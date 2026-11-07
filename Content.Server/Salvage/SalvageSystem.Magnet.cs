@@ -426,11 +426,16 @@ public sealed partial class SalvageSystem
         var grids = new List<Entity<MapGridComponent>>();
 
         // Thanks 20kdc
-        for (var i = 0; i < 20; i++)
+        // In a persistent world, grids from earlier rounds (old debris, parked shuttles, outposts) can sit in the
+        // magnet's spawn lane forever. So search much further out than a fresh round would ever need, and widen the
+        // sideways spread as we go, instead of giving up after a short distance.
+        const int attempts = 60;
+        for (var i = 0; i < attempts; i++)
         {
+            var lateral = magnet.Comp.LateralOffset * (1f + i / 10f);
             var randomPos = origin +
                             worldAngle.ToVec() * (magnet.Comp.MagnetSpawnDistance * fraction) +
-                            (worldAngle + Math.PI / 2).ToVec() * _random.NextFloat(-magnet.Comp.LateralOffset, magnet.Comp.LateralOffset);
+                            (worldAngle + Math.PI / 2).ToVec() * _random.NextFloat(-lateral, lateral);
             var finalCoords = new MapCoordinates(randomPos, mapId);
 
             angle = _random.NextAngle();
@@ -443,8 +448,8 @@ public sealed partial class SalvageSystem
             _mapSystem.FindGridsIntersecting(finalCoords.MapId, box2Rot, ref grids);
             if (grids.Count > 0)
             {
-                // Bump it further and further just in case.
-                fraction += 0.1f;
+                // Bump it further and further just in case (faster after the first few tries).
+                fraction += i < 10 ? 0.1f : 0.25f;
                 continue;
             }
 

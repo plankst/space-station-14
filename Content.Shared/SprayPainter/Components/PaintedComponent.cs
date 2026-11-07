@@ -15,4 +15,11 @@ public sealed partial class PaintedComponent : Component
     /// </summary>
     [DataField(customTypeSerializer: typeof(TimeOffsetSerializer)), AutoNetworkedField, AutoPausedField]
     public TimeSpan DryTime;
+
+    /// <summary>
+    /// The style the entity was painted with. The visuals themselves live in appearance data, which isn't saved, so
+    /// this is what lets a painted locker/crate/door keep its paint after a world save is loaded.
+    /// </summary>
+    [DataField]
+    public string? Prototype;
 }

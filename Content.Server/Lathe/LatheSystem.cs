@@ -63,6 +63,7 @@ namespace Content.Server.Lathe
             base.Initialize();
             SubscribeLocalEvent<LatheComponent, GetMaterialWhitelistEvent>(OnGetWhitelist);
             SubscribeLocalEvent<LatheComponent, MapInitEvent>(OnMapInit);
+            SubscribeLocalEvent<LatheComponent, ComponentStartup>(OnStartup);
             SubscribeLocalEvent<LatheComponent, PowerChangedEvent>(OnPowerChanged);
             SubscribeLocalEvent<LatheComponent, TechnologyDatabaseModifiedEvent>(OnDatabaseModified);
             SubscribeLocalEvent<LatheAnnouncingComponent, TechnologyDatabaseModifiedEvent>(OnTechnologyDatabaseModified);
@@ -338,6 +339,16 @@ namespace Content.Server.Lathe
             _appearance.SetData(uid, LatheVisuals.IsRunning, false);
 
             _materialStorage.UpdateMaterialWhitelist(uid);
+        }
+
+        /// <summary>
+        /// Appearance data isn't saved, so a lathe loaded from a world save needs its layers initialized again
+        /// (MapInit doesn't run for it), or its animations play forever.
+        /// </summary>
+        private void OnStartup(EntityUid uid, LatheComponent component, ComponentStartup args)
+        {
+            _appearance.SetData(uid, LatheVisuals.IsInserting, false);
+            _appearance.SetData(uid, LatheVisuals.IsRunning, HasComp<LatheProducingComponent>(uid));
         }
 
         /// <summary>

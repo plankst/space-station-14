@@ -582,6 +582,116 @@ public sealed class WorldPersistenceTest : GameTest
     }
 
     /// <summary>
+    /// Things that only lived in non-saved runtime state must come back right after a load:
+    /// - a UI that was open when the world was saved must not stay "open" (the first click on a dispenser closed it);
+    /// - lathes must have their animation flags set (otherwise the insertion animation loops forever);
+    /// - painted lockers keep their paint.
+    /// </summary>
+    [Test]
+    public async Task UiLatheAndPaintSurviveLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var playerMan = server.ResolveDependency<IPlayerManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mindSys = entMan.System<SharedMindSystem>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var ui = entMan.System<SharedUserInterfaceSystem>();
+        var appearance = entMan.System<SharedAppearanceSystem>();
+        var interaction = entMan.System<Content.Shared.Interaction.SharedInteractionSystem>();
+        var player = playerMan.Sessions.Single();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string paint = "LockerCaptain";
+        await server.WaitPost(() =>
+        {
+            var q = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (q.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                for (var x = -3; x <= 3; x++)
+                {
+                    mapSys.SetTile(grid, gridComp, new Vector2i(x, 0), new Tile(1));
+                }
+
+                var dispenser = entMan.SpawnEntity("ChemDispenser", new EntityCoordinates(grid, 1.5f, 0.5f));
+                entMan.GetComponent<Content.Server.Power.Components.ApcPowerReceiverComponent>(dispenser).NeedsPower = false;
+                entMan.SpawnEntity("Autolathe", new EntityCoordinates(grid, -1.5f, 0.5f));
+
+                // Paint a locker the same way the spray painter does.
+                var locker = entMan.SpawnEntity("LockerSteel", new EntityCoordinates(grid, -2.5f, 0.5f));
+                appearance.SetData(locker, Content.Shared.SprayPainter.Prototypes.PaintableVisuals.Prototype, paint);
+                entMan.EnsureComponent<Content.Shared.SprayPainter.Components.PaintedComponent>(locker).Prototype = paint;
+
+                var body = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 0.5f, 0.5f));
+                var mind = mindSys.CreateMind(player.UserId, "Persistent UI Tester");
+                mindSys.TransferTo(mind, body);
+                break;
+            }
+        });
+        await pair.RunTicksSync(10);
+
+        T Find<T>() where T : IComponent
+        {
+            var q = entMan.AllEntityQueryEnumerator<T, TransformComponent>();
+            while (q.MoveNext(out var uid, out var comp, out var xform))
+            {
+                if (xform.MapID == ticker.DefaultMap)
+                    return comp;
+            }
+
+            return default!;
+        }
+
+        // Leave the dispenser UI open when the world is saved.
+        await server.WaitPost(() =>
+        {
+            var dispenser = Find<Content.Server.Chemistry.Components.ReagentDispenserComponent>().Owner;
+            interaction.InteractHand(player.AttachedEntity!.Value, dispenser);
+            Assert.That(ui.IsUiOpen(dispenser, Content.Shared.Chemistry.ReagentDispenserUiKey.Key, player.AttachedEntity!.Value));
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            // The first click opens the dispenser UI instead of "closing" the one left open in the save.
+            var dispenser = Find<Content.Server.Chemistry.Components.ReagentDispenserComponent>().Owner;
+            var user = player.AttachedEntity!.Value;
+            Assert.That(ui.IsUiOpen(dispenser, Content.Shared.Chemistry.ReagentDispenserUiKey.Key, user), Is.False,
+                "UI left open in the save should be closed after loading");
+            interaction.InteractHand(user, dispenser);
+            Assert.That(ui.IsUiOpen(dispenser, Content.Shared.Chemistry.ReagentDispenserUiKey.Key, user),
+                "First click on a loaded dispenser didn't open its UI");
+
+            // Lathe animation flags are set, and nothing is being inserted.
+            var lathe = Find<Content.Shared.Lathe.LatheComponent>().Owner;
+            Assert.That(appearance.TryGetData<bool>(lathe, Content.Shared.Materials.MaterialStorageVisuals.Inserting, out var inserting) && !inserting,
+                "Loaded lathe is missing its 'not inserting' flag");
+            Assert.That(appearance.TryGetData<bool>(lathe, Content.Shared.Lathe.LatheVisuals.IsInserting, out var latheInserting) && !latheInserting);
+            Assert.That(appearance.TryGetData<bool>(lathe, Content.Shared.Lathe.LatheVisuals.IsRunning, out _));
+
+            // The locker kept its paint.
+            var painted = Find<Content.Shared.SprayPainter.Components.PaintedComponent>().Owner;
+            Assert.That(appearance.TryGetData<string>(painted, Content.Shared.SprayPainter.Prototypes.PaintableVisuals.Prototype, out var style),
+                "Painted locker lost its paint");
+            Assert.That(style, Is.EqualTo(paint));
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
     /// Holds the "move right" key on the client for a second and reports whether the player's entity moved.
     /// </summary>
     private static async Task<bool> MovesWhenWalking(Pair.TestPair pair, Robust.Shared.Player.ICommonSession player)

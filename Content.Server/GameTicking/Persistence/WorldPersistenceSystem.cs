@@ -40,6 +40,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private ServerGameTicker _ticker = default!;
     [Dependency] private MapLoaderSystem _loader = default!;
     [Dependency] private SharedMapSystem _map = default!;
+    [Dependency] private SharedUserInterfaceSystem _ui = default!;
 
     private bool _enabled;
     private ResPath _savePath;
@@ -332,9 +333,24 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             return false;
         }
 
+        CloseSavedUis(result);
+
         Log.Info($"Loaded world from {_savePath} in {stopwatch.Elapsed.TotalSeconds:N2}s: " +
                  $"{result.Maps.Count} maps, {result.Grids.Count} grids, {result.Entities.Count} entities.");
         return true;
+    }
+
+    /// <summary>
+    /// The save remembers which UIs were open (and for whom). Nobody actually has them open after a restart, and
+    /// leftover "open" state makes the first click on e.g. a dispenser close the UI instead of opening it.
+    /// </summary>
+    private void CloseSavedUis(LoadResult result)
+    {
+        foreach (var uid in result.Entities)
+        {
+            if (TryComp<UserInterfaceComponent>(uid, out var ui) && ui.Actors.Count > 0)
+                _ui.CloseUis((uid, ui));
+        }
     }
 
     /// <summary>

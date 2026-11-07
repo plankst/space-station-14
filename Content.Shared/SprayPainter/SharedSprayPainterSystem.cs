@@ -40,6 +40,7 @@ public abstract partial class SharedSprayPainterSystem : EntitySystem
         SubscribeLocalEvent<SprayPainterComponent, GetVerbsEvent<AlternativeVerb>>(OnPainterGetAltVerbs);
         SubscribeLocalEvent<PaintableComponent, InteractUsingEvent>(OnPaintableInteract);
         SubscribeLocalEvent<PaintedComponent, ExaminedEvent>(OnPainedExamined);
+        SubscribeLocalEvent<PaintedComponent, ComponentStartup>(OnPaintedStartup);
 
         Subs.BuiEvents<SprayPainterComponent>(SprayPainterUiKey.Key,
             subs =>
@@ -102,6 +103,7 @@ public abstract partial class SharedSprayPainterSystem : EntitySystem
 
         var paintedComponent = EnsureComp<PaintedComponent>(target);
         paintedComponent.DryTime = _timing.CurTime + ent.Comp.FreshPaintDuration;
+        paintedComponent.Prototype = args.Prototype;
         Dirty(target, paintedComponent);
 
         var ev = new EntityPaintedEvent(
@@ -226,6 +228,15 @@ public abstract partial class SharedSprayPainterSystem : EntitySystem
     /// <summary>
     /// Prints out if an object has been painted recently.
     /// </summary>
+    /// <summary>
+    /// Re-applies the paint to entities loaded from a world save (appearance data isn't saved).
+    /// </summary>
+    private void OnPaintedStartup(Entity<PaintedComponent> ent, ref ComponentStartup args)
+    {
+        if (ent.Comp.Prototype != null)
+            Appearance.SetData(ent, PaintableVisuals.Prototype, ent.Comp.Prototype);
+    }
+
     private void OnPainedExamined(Entity<PaintedComponent> ent, ref ExaminedEvent args)
     {
         // If the paint's dried, it isn't detectable.

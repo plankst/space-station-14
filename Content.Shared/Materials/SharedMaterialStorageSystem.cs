@@ -33,6 +33,7 @@ public abstract partial class SharedMaterialStorageSystem : EntitySystem
         base.Initialize();
 
         SubscribeLocalEvent<MaterialStorageComponent, MapInitEvent>(OnMapInit);
+        SubscribeLocalEvent<MaterialStorageComponent, ComponentStartup>(OnStartup);
         SubscribeLocalEvent<MaterialStorageComponent, InteractUsingEvent>(OnInteractUsing);
         SubscribeLocalEvent<MaterialStorageComponent, TechnologyDatabaseModifiedEvent>(OnDatabaseModified);
     }
@@ -54,6 +55,16 @@ public abstract partial class SharedMaterialStorageSystem : EntitySystem
     private void OnMapInit(EntityUid uid, MaterialStorageComponent component, MapInitEvent args)
     {
         _appearance.SetData(uid, MaterialStorageVisuals.Inserting, false);
+    }
+
+    /// <summary>
+    /// Appearance data isn't saved, so a lathe loaded from a world save would have no "inserting" flag at all and
+    /// the client would leave the insertion animation playing forever. Set it here as well, based on whether an
+    /// insertion is actually in progress.
+    /// </summary>
+    private void OnStartup(EntityUid uid, MaterialStorageComponent component, ComponentStartup args)
+    {
+        _appearance.SetData(uid, MaterialStorageVisuals.Inserting, HasComp<InsertingMaterialStorageComponent>(uid));
     }
 
     /// <summary>
