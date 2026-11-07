@@ -110,6 +110,10 @@ public abstract partial class SharedStunSystem
     {
         // hate. let me tell you how much i hate...
         // this may have unforseen consequences. blame scar
+        // No point standing up an entity that is being deleted (this also tried to add status effects to it).
+        if (TerminatingOrDeleted(entity.Owner))
+            return;
+
         ForceStandUp((entity.Owner, null), true);
     }
 

@@ -63,7 +63,8 @@ public sealed partial class MindSystem : SharedMindSystem
         TransferTo(mindId, null, createGhost: false, mind: mind);
         DebugTools.AssertNull(mind.OwnedEntity);
 
-        if (!component.GhostOnShutdown || _gameTicker.RunLevel == GameRunLevel.PreRoundLobby)
+        // Don't spawn ghosts while the whole server is shutting down and deleting every entity.
+        if (!component.GhostOnShutdown || _gameTicker.RunLevel == GameRunLevel.PreRoundLobby || EntityManager.ShuttingDown)
             return;
 
         var ghost = _ghosts.SpawnGhost((mindId, mind), uid);
@@ -308,8 +309,13 @@ public sealed partial class MindSystem : SharedMindSystem
         if (mind.UserId != null)
         {
             UserMinds.Remove(mind.UserId.Value);
-            if (_players.GetPlayerData(mind.UserId.Value).ContentData() is { } oldData)
+            // A mind loaded from a world save can belong to a player who hasn't connected since the server started,
+            // in which case there is no player data for them yet.
+            if (_players.TryGetPlayerData(mind.UserId.Value, out var oldPlayerData) &&
+                oldPlayerData.ContentData() is { } oldData)
+            {
                 oldData.Mind = null;
+            }
             mind.UserId = null;
         }
 

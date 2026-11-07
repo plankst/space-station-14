@@ -4,6 +4,9 @@ using Content.IntegrationTests.Fixtures;
 using Content.Server.GameTicking;
 using Content.Server.GameTicking.Persistence;
 using Content.Shared.CCVar;
+using Content.Shared.Chemistry.Components;
+using Content.Shared.Chemistry.Components.SolutionManager;
+using Content.Shared.Chemistry.EntitySystems;
 using Content.Shared.Mind;
 using Content.Shared.Mobs.Components;
 using Robust.Server.Player;
@@ -184,6 +187,22 @@ public sealed class WorldPersistenceTest : GameTest
             .ToList();
 
         Assert.That(missing, Is.Empty, "Entities were lost by the world save:\n" + string.Join("\n", missing));
+
+        // Loaded entities must still be able to find their solutions (lungs, bloodstream, stomach, beakers, ...).
+        // Loading doesn't raise container insert events, which is what normally fills in the solution lookup.
+        var broken = new List<string>();
+        await server.WaitPost(() =>
+        {
+            var solutions = entMan.System<SharedSolutionContainerSystem>();
+            var query = entMan.AllEntityQueryEnumerator<SolutionComponent, ContainedSolutionComponent>();
+            while (query.MoveNext(out var uid, out var solution, out var contained))
+            {
+                if (!solutions.TryGetSolution(contained.Container, solution.Id, out var found) || found.Value.Owner != uid)
+                    broken.Add($"{entMan.ToPrettyString(contained.Container)}: {solution.Id}");
+            }
+        });
+
+        Assert.That(broken, Is.Empty, "Solutions can't be found after loading:\n" + string.Join("\n", broken.Take(20)));
 
         await Cleanup(pair);
     }

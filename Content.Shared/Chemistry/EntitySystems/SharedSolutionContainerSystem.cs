@@ -97,6 +97,7 @@ public abstract partial class SharedSolutionContainerSystem : EntitySystem
         SubscribeLocalEvent<ExaminableSolutionComponent, GetVerbsEvent<ExamineVerb>>(OnSolutionExaminableVerb);
 
         SubscribeLocalEvent<SolutionManagerComponent, MapInitEvent>(OnManagerInit);
+        SubscribeLocalEvent<SolutionManagerComponent, ComponentStartup>(OnManagerStartup);
         SubscribeLocalEvent<SolutionManagerComponent, ComponentShutdown>(OnManagerShutdown);
         SubscribeLocalEvent<SolutionManagerComponent, EntInsertedIntoContainerMessage>(OnSolutionAdded);
         SubscribeLocalEvent<SolutionManagerComponent, EntRemovedFromContainerMessage>(OnSolutionRemoved);
@@ -1083,6 +1084,24 @@ public abstract partial class SharedSolutionContainerSystem : EntitySystem
     private void OnManagerInit(Entity<SolutionManagerComponent> entity, ref MapInitEvent args)
     {
         InitializeManager(entity);
+    }
+
+    /// <summary>
+    /// Entities loaded from a save (e.g. a persistent world save) already have their solution entities sitting in the
+    /// container, but loading doesn't raise <see cref="EntInsertedIntoContainerMessage"/>, so the solution cache would be
+    /// empty and every solution lookup would fail (lungs can't breathe, bloodstream/stomach/beakers stop working, ...).
+    /// Rebuild the cache from the container's contents here.
+    /// </summary>
+    private void OnManagerStartup(Entity<SolutionManagerComponent> entity, ref ComponentStartup args)
+    {
+        if (!ContainerSystem.TryGetContainer(entity, entity.Comp.Container, out var container))
+            return;
+
+        foreach (var contained in container.ContainedEntities)
+        {
+            if (SolutionQuery.TryComp(contained, out var solution))
+                entity.Comp.Solutions[solution.Id] = (contained, solution);
+        }
     }
 
     private void InitializeManager(Entity<SolutionManagerComponent> entity)
