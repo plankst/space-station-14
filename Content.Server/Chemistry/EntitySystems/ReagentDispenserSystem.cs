@@ -47,7 +47,9 @@ namespace Content.Server.Chemistry.EntitySystems
             SubscribeLocalEvent<ReagentDispenserComponent, ReagentDispenserEjectContainerMessage>(OnEjectReagentMessage);
             SubscribeLocalEvent<ReagentDispenserComponent, ReagentDispenserClearContainerSolutionMessage>(OnClearContainerSolutionMessage);
 
-            SubscribeLocalEvent<ReagentDispenserComponent, MapInitEvent>(OnMapInit, before: new[] { typeof(ItemSlotsSystem) });
+            // ComponentInit (not MapInit), so the beaker slot also exists on dispensers loaded from a world save.
+            // Item slots aren't saved, they have to be re-added every time the entity is created.
+            SubscribeLocalEvent<ReagentDispenserComponent, ComponentInit>(OnComponentInit);
         }
 
         private void SubscribeUpdateUiState<T>(Entity<ReagentDispenserComponent> ent, ref T ev)
@@ -189,7 +191,7 @@ namespace Content.Server.Chemistry.EntitySystems
         /// <summary>
         /// Initializes the beaker slot
         /// </summary>
-        private void OnMapInit(Entity<ReagentDispenserComponent> ent, ref MapInitEvent args)
+        private void OnComponentInit(Entity<ReagentDispenserComponent> ent, ref ComponentInit args)
         {
             _itemSlotsSystem.AddItemSlot(ent.Owner, SharedReagentDispenser.OutputSlotName, ent.Comp.BeakerSlot);
         }

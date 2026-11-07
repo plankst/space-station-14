@@ -396,6 +396,11 @@ namespace Content.Server.Chemistry.EntitySystems
             if (!TryComp(container, out StorageComponent? storage))
                 return null;
 
+            // While a world save is loading, the ChemMaster can start up before the pill canister in its output slot,
+            // so the canister's storage container doesn't exist yet. The UI is rebuilt when it's opened or changed.
+            if (storage.Container == null)
+                return null;
+
             var pills = storage.Container.ContainedEntities.Select((Func<EntityUid, (string, FixedPoint2 quantity)>) (pill =>
             {
                 _solutionContainerSystem.TryGetSolution(pill, SharedChemMaster.PillSolutionName, out _, out var solution);

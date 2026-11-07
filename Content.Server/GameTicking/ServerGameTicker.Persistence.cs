@@ -13,6 +13,8 @@ namespace Content.Server.GameTicking;
 public sealed partial class ServerGameTicker
 {
     [Dependency] private WorldPersistenceSystem _worldPersistence = default!;
+    [Dependency] private PersistentPlayerFixSystem _playerFix = default!;
+    [Dependency] private PersistentDispenserFixSystem _dispenserFix = default!;
 
     /// <summary>
     /// True if the current round's world was loaded from the world save instead of a fresh map.
@@ -36,6 +38,15 @@ public sealed partial class ServerGameTicker
         DefaultMap = mapId;
         WorldRestoredFromSave = true;
         RelinkLoadedMinds();
+
+        // TEMPORARY workaround for players who can't move after loading (game.temp_playerfix).
+        if (_playerFix.Enabled)
+            _playerFix.ReplacePlayerBodies();
+
+        // TEMPORARY workaround for broken reagent dispensers after loading (game.temp_dispensefix).
+        if (_dispenserFix.Enabled)
+            _dispenserFix.ReplaceDispensers();
+
         return true;
     }
 

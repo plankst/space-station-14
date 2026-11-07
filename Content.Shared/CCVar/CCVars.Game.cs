@@ -133,6 +133,23 @@ public sealed partial class CCVars
         PersistenceSaveOnRoundRestart = CVarDef.Create("game.persistence_save_on_round_restart", true, CVar.SERVERONLY | CVar.ARCHIVE);
 
     /// <summary>
+    ///     TEMPORARY workaround for players who can't move after a world save is loaded.
+    ///     When the world save is loaded, every living player body is replaced by a fresh clone (same species,
+    ///     appearance, traits, equipment and damage) that is offered as a ghost role, so an observer can take it.
+    ///     The player whose body it was joins as an observer and can take it from the ghost roles menu.
+    /// </summary>
+    public static readonly CVarDef<bool>
+        TempPlayerFix = CVarDef.Create("game.temp_playerfix", false, CVar.SERVERONLY | CVar.ARCHIVE);
+
+    /// <summary>
+    ///     TEMPORARY workaround for reagent dispensers (chem/soda/booze) that are broken after a world save is loaded.
+    ///     When the world save is loaded, every dispenser is replaced by a fresh copy of the same prototype, in the same
+    ///     place, with the same rotation, anchoring, name and contents (jugs, inserted beaker).
+    /// </summary>
+    public static readonly CVarDef<bool>
+        TempDispenseFix = CVarDef.Create("game.temp_dispensefix", false, CVar.SERVERONLY | CVar.ARCHIVE);
+
+    /// <summary>
     ///     Prototype to use for map pool.
     /// </summary>
     public static readonly CVarDef<string>

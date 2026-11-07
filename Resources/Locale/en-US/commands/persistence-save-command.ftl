@@ -5,3 +5,5 @@ cmd-persistencesave-world-disabled = World persistence is disabled. Set {$cvar} 
 cmd-persistencesave-world-no-round = There is no round in progress, so there is no world to save.
 cmd-persistencesave-world-success = World saved to {$path}.
 cmd-persistencesave-world-failed = Failed to save the world. Check the server log for details.
+
+temp-playerfix-ghost-role-description = The body of {$name}, restored from the world save. Whoever played them can take it back.

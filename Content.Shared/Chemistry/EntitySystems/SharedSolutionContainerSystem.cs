@@ -98,6 +98,7 @@ public abstract partial class SharedSolutionContainerSystem : EntitySystem
 
         SubscribeLocalEvent<SolutionManagerComponent, MapInitEvent>(OnManagerInit);
         SubscribeLocalEvent<SolutionManagerComponent, ComponentStartup>(OnManagerStartup);
+        SubscribeLocalEvent<SolutionComponent, ComponentStartup>(OnSolutionStartup);
         SubscribeLocalEvent<SolutionManagerComponent, ComponentShutdown>(OnManagerShutdown);
         SubscribeLocalEvent<SolutionManagerComponent, EntInsertedIntoContainerMessage>(OnSolutionAdded);
         SubscribeLocalEvent<SolutionManagerComponent, EntRemovedFromContainerMessage>(OnSolutionRemoved);
@@ -1102,6 +1103,41 @@ public abstract partial class SharedSolutionContainerSystem : EntitySystem
             if (SolutionQuery.TryComp(contained, out var solution))
                 entity.Comp.Solutions[solution.Id] = (contained, solution);
         }
+
+        // Appearance data isn't saved either, so a loaded container would show no liquid color/fill level until its
+        // contents next change. Push the current state to the visuals now (the server networks it to clients).
+        if (Net.IsClient || entity.Comp.Solutions.Count == 0)
+            return;
+
+        if (!TryComp<SolutionContainerVisualsComponent>(entity, out var visuals))
+            return;
+
+        Entity<SolutionComponent>? shown = null;
+        if (visuals.SolutionName != null && entity.Comp.Solutions.TryGetValue(visuals.SolutionName, out var named))
+            shown = named;
+        else
+        {
+            foreach (var soln in entity.Comp.Solutions.Values)
+            {
+                shown = soln;
+                break;
+            }
+        }
+
+        if (shown != null)
+            UpdateAppearance(entity.Owner, shown.Value);
+    }
+
+    /// <summary>
+    /// Some entities hold their solution on themselves (e.g. beakers) rather than in a solution manager.
+    /// Appearance data isn't saved, so refresh the liquid color/fill level when one is loaded from a save.
+    /// </summary>
+    private void OnSolutionStartup(Entity<SolutionComponent> entity, ref ComponentStartup args)
+    {
+        if (Net.IsClient || HasComp<ContainedSolutionComponent>(entity))
+            return;
+
+        UpdateAppearance(entity.Owner, entity);
     }
 
     private void InitializeManager(Entity<SolutionManagerComponent> entity)
