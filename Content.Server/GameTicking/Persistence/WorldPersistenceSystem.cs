@@ -4,6 +4,10 @@ using Content.Server.Procedural;
 using Content.Shared.CCVar;
 using Content.Shared.GameTicking;
 using Content.Shared.GameTicking.Components;
+using Content.Shared.Hands.Components;
+using Content.Shared.Hands.EntitySystems;
+using Content.Shared.Inventory.VirtualItem;
+using Content.Shared.Mind;
 using Robust.Shared.Audio.Components;
 using Robust.Shared.Configuration;
 using Robust.Shared.ContentPack;
@@ -41,6 +45,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private MapLoaderSystem _loader = default!;
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private SharedUserInterfaceSystem _ui = default!;
+    [Dependency] private SharedHandsSystem _hands = default!;
 
     private bool _enabled;
     private ResPath _savePath;
@@ -156,6 +161,35 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
         _pendingWrite = Task.Run(() => WriteSave(data, reason, stopwatch));
         return true;
+    }
+
+    /// <summary>
+    /// Drops whatever players are holding onto the floor at their feet. Items held in hands don't survive a world
+    /// save, so this is done right before the shutdown save to keep them in the world.
+    /// </summary>
+    public void DropPlayersHeldItems()
+    {
+        var dropped = 0;
+        var query = EntityQueryEnumerator<MindComponent>();
+        while (query.MoveNext(out _, out var mind))
+        {
+            if (mind.OriginalOwnerUserId == null || mind.OwnedEntity is not { } body)
+                continue;
+
+            if (!TryComp<HandsComponent>(body, out var hands))
+                continue;
+
+            foreach (var held in _hands.EnumerateHeld((body, hands)))
+            {
+                if (!HasComp<VirtualItemComponent>(held))
+                    dropped++;
+            }
+
+            _hands.DropAll((body, hands), checkActionBlocker: false, doDropInteraction: false);
+        }
+
+        if (dropped > 0)
+            Log.Info($"Dropped {dropped} held item(s) onto the floor before saving.");
     }
 
     /// <summary>

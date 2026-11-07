@@ -35,6 +35,25 @@ public sealed partial class UseDelaySystem : EntitySystem
         };
     }
 
+    /// <summary>
+    /// Delay start/end times are saved as absolute game times. After a server restart the game clock starts from zero
+    /// again, so a delay loaded from a world save could look like it lasts for hours (e.g. a dispenser ignoring every
+    /// click). A delay can never legitimately end later than "now + its length", so clear any that do.
+    /// </summary>
+    [SubscribeLocalEvent]
+    private void OnStartup(Entity<UseDelayComponent> ent, ref ComponentStartup args)
+    {
+        var now = _gameTiming.CurTime;
+        foreach (var entry in ent.Comp.Delays.Values)
+        {
+            if (entry.EndTime <= now + entry.Length)
+                continue;
+
+            entry.StartTime = now;
+            entry.EndTime = now;
+        }
+    }
+
     [SubscribeLocalEvent]
     private void OnMapInit(Entity<UseDelayComponent> ent, ref MapInitEvent args)
     {

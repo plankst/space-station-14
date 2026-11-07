@@ -113,7 +113,11 @@ public sealed partial class ServerGameTicker
         if (!Cfg.GetCVar(CCVars.PersistenceSaveOnRoundRestart))
             return;
 
-        if (_worldPersistence.CanSave())
-            _worldPersistence.SaveWorld("round restart");
+        if (!_worldPersistence.CanSave())
+            return;
+
+        // Items held in hands don't survive a save, so put them on the floor first.
+        _worldPersistence.DropPlayersHeldItems();
+        _worldPersistence.SaveWorld("round restart");
     }
 }

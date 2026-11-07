@@ -651,11 +651,23 @@ public sealed class WorldPersistenceTest : GameTest
         }
 
         // Leave the dispenser UI open when the world is saved.
+        var useDelay = entMan.System<Content.Shared.Timing.Systems.UseDelaySystem>();
         await server.WaitPost(() =>
         {
             var dispenser = Find<Content.Server.Chemistry.Components.ReagentDispenserComponent>().Owner;
             interaction.InteractHand(player.AttachedEntity!.Value, dispenser);
             Assert.That(ui.IsUiOpen(dispenser, Content.Shared.Chemistry.ReagentDispenserUiKey.Key, player.AttachedEntity!.Value));
+
+            // Simulate a use-delay saved by an earlier server run: its end time is hours past "now" (the game clock
+            // restarts from zero after a reboot). This made dispensers ignore left-click/E after loading.
+            useDelay.SetLength(dispenser, TimeSpan.FromHours(10));
+            useDelay.TryResetDelay(dispenser);
+            useDelay.SetLength(dispenser, TimeSpan.Zero);
+            Assert.That(useDelay.IsDelayed(dispenser));
+
+            // Hold an item, which would otherwise be lost by the save.
+            var crowbar = entMan.SpawnEntity("Crowbar", entMan.GetComponent<TransformComponent>(player.AttachedEntity!.Value).Coordinates);
+            Assert.That(entMan.System<Content.Shared.Hands.EntitySystems.SharedHandsSystem>().TryPickupAnyHand(player.AttachedEntity!.Value, crowbar));
         });
         await pair.RunTicksSync(5);
 
@@ -670,6 +682,20 @@ public sealed class WorldPersistenceTest : GameTest
             var user = player.AttachedEntity!.Value;
             Assert.That(ui.IsUiOpen(dispenser, Content.Shared.Chemistry.ReagentDispenserUiKey.Key, user), Is.False,
                 "UI left open in the save should be closed after loading");
+            Assert.That(useDelay.IsDelayed(dispenser), Is.False, "Stale use-delay from the save still blocks the dispenser");
+
+            // The held crowbar was put on the floor instead of being lost.
+            var crowbars = 0;
+            var cq = entMan.AllEntityQueryEnumerator<MetaDataComponent, TransformComponent>();
+            while (cq.MoveNext(out var cUid, out var cMeta, out var cXform))
+            {
+                if (cMeta.EntityPrototype?.ID == "Crowbar" && cXform.MapID == ticker.DefaultMap)
+                {
+                    crowbars++;
+                    Assert.That(entMan.System<Robust.Shared.Containers.SharedContainerSystem>().IsEntityInContainer(cUid), Is.False);
+                }
+            }
+            Assert.That(crowbars, Is.EqualTo(1), "Held item was lost by the save");
             interaction.InteractHand(user, dispenser);
             Assert.That(ui.IsUiOpen(dispenser, Content.Shared.Chemistry.ReagentDispenserUiKey.Key, user),
                 "First click on a loaded dispenser didn't open its UI");
