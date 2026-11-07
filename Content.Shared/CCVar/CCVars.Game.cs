@@ -113,6 +113,26 @@ public sealed partial class CCVars
         PersistenceMap = CVarDef.Create("game.persistencemap", "Empty", CVar.ARCHIVE);
 
     /// <summary>
+    ///     Where the full world save is written, relative to the server's data folder.
+    ///     Only used when <see cref="UsePersistence"/> is enabled.
+    /// </summary>
+    public static readonly CVarDef<string>
+        PersistenceWorldFile = CVarDef.Create("game.persistence_world_file", "/persistence/World.yml", CVar.SERVERONLY | CVar.ARCHIVE);
+
+    /// <summary>
+    ///     How often the world is automatically saved, in seconds. 0 disables autosaving.
+    ///     Autosaves protect against losing progress if the server crashes or is killed.
+    /// </summary>
+    public static readonly CVarDef<float>
+        PersistenceAutosaveInterval = CVarDef.Create("game.persistence_autosave_interval", 600f, CVar.SERVERONLY | CVar.ARCHIVE);
+
+    /// <summary>
+    ///     If true, the world is saved when a round restarts, so the next round continues where the last one left off.
+    /// </summary>
+    public static readonly CVarDef<bool>
+        PersistenceSaveOnRoundRestart = CVarDef.Create("game.persistence_save_on_round_restart", true, CVar.SERVERONLY | CVar.ARCHIVE);
+
+    /// <summary>
     ///     Prototype to use for map pool.
     /// </summary>
     public static readonly CVarDef<string>

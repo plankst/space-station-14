@@ -91,6 +91,19 @@ public sealed partial class ActionContainerSystem : EntitySystem
 
         if (Exists(actionId))
         {
+            // While entities are being loaded from a save (e.g. a persistent world save), a component's init/startup can
+            // run before the saved action entity and this container have been set up. The saved action is already
+            // linked to its owner, so just use it instead of failing or spawning a duplicate.
+            if (comp.Container == null
+                || LifeStage(actionId.Value) < EntityLifeStage.Initialized
+                || _netMan.IsServer && LifeStage(uid) < EntityLifeStage.MapInitialized)
+            {
+                if (!_query.TryComp(actionId, out action))
+                    return false;
+
+                return true;
+            }
+
             if (!comp.Container.Contains(actionId.Value))
             {
                 Log.Error($"Action {ToPrettyString(actionId.Value)} is not contained in the expected container {ToPrettyString(uid)}");

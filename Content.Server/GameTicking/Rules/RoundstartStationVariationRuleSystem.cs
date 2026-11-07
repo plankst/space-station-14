@@ -14,6 +14,7 @@ namespace Content.Server.GameTicking.Rules;
 public sealed partial class RoundstartStationVariationRuleSystem : GameRuleSystem<RoundstartStationVariationRuleComponent>
 {
     [Dependency] private IRobustRandom _random = default!;
+    [Dependency] private ServerGameTicker _ticker = default!;
 
     public override void Initialize()
     {
@@ -25,6 +26,11 @@ public sealed partial class RoundstartStationVariationRuleSystem : GameRuleSyste
     protected override void Added(Entity<RoundstartStationVariationRuleComponent, GameRuleComponent> ent, ref GameRuleAddedEvent args)
     {
         base.Added(ent, ref args);
+
+        // A world restored from a persistence save was already varied when it was first created.
+        // Running the passes again would pile more trash, rust, graffiti, etc. onto the world every restart.
+        if (_ticker.WorldRestoredFromSave)
+            return;
 
         var spawns = EntitySpawnCollection.GetSpawns(ent.Comp1.Rules, _random);
         foreach (var rule in spawns)

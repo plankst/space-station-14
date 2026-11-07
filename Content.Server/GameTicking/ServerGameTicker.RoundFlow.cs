@@ -73,6 +73,14 @@ public sealed partial class ServerGameTicker
         if (Map.MapExists(DefaultMap))
             return;
 
+        // World persistence: continue from the saved world instead of loading a fresh map.
+        // This happens before the preset's rules are added, so rules can tell that the world was restored.
+        if (TryLoadPersistentWorld())
+        {
+            AddGamePresetRules();
+            return;
+        }
+
         AddGamePresetRules();
 
         var maps = new List<GameMapPrototype>();
@@ -376,6 +384,9 @@ public sealed partial class ServerGameTicker
         // Just in case it hasn't been loaded previously we'll try loading it.
         LoadMaps();
 
+        // Players with a body in a loaded world save go back into it instead of spawning a new character.
+        RestorePersistentPlayers(readyPlayers, readyPlayerProfiles);
+
         // map has been selected so update the lobby info text
         // applies to players who didn't ready up
         UpdateInfoText();
@@ -621,6 +632,9 @@ public sealed partial class ServerGameTicker
         if (_serverUpdates.RoundEnded())
             return;
 
+        // Save the world before it gets wiped, so the next round continues from it.
+        SaveWorldBeforeRestart();
+
         // Check if the GamePreset needs to be reset
         TryResetPreset();
 
@@ -699,6 +713,8 @@ public sealed partial class ServerGameTicker
         _banManager.Restart();
 
         _gameMapManager.ClearSelectedMap();
+
+        WorldRestoredFromSave = false;
 
         // Clear up any game rules.
         CurrentPreset = null;

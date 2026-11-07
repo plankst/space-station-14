@@ -17,6 +17,7 @@ using Content.Shared.Whitelist;
 using Robust.Shared.Audio.Systems;
 using Robust.Shared.GameStates;
 using Robust.Shared.Map;
+using Robust.Shared.Network;
 using Robust.Shared.Timing;
 using Robust.Shared.Utility;
 
@@ -28,6 +29,7 @@ public abstract partial class SharedActionsSystem : EntitySystem
     [Dependency] private ISharedAdminLogManager _adminLogger = default!;
     [Dependency] private ActionBlockerSystem _actionBlocker = default!;
     [Dependency] private ActionContainerSystem _actionContainer = default!;
+    [Dependency] private INetManager _net = default!;
     [Dependency] private EntityWhitelistSystem _whitelist = default!;
     [Dependency] private ExamineSystemShared _examine = default!;
     [Dependency] private RotateToFaceSystem _rotateToFace = default!;
@@ -695,6 +697,16 @@ public abstract partial class SharedActionsSystem : EntitySystem
 
         if (!_actionContainer.EnsureAction(container, ref actionId, out action, actionPrototypeId))
             return false;
+
+        // While loading a save (e.g. a persistent world save), a component's init/startup may "add" an action that the
+        // saved entity already has. It is already attached, so leave it alone instead of re-adding it (which would
+        // also reset its cooldown).
+        if (_net.IsServer
+            && LifeStage(performer) < EntityLifeStage.MapInitialized
+            && action.AttachedEntity == performer)
+        {
+            return true;
+        }
 
         return AddActionDirect((performer, component), (actionId.Value, action));
     }

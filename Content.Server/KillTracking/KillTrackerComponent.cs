@@ -19,7 +19,11 @@ public sealed partial class KillTrackerComponent : Component
     /// <summary>
     /// A dictionary of sources and how much damage they've done to this entity over time.
     /// </summary>
-    [DataField("lifetimeDamage")]
+    /// <remarks>
+    /// Not a data field: the record keys can't be written as YAML mapping keys, which broke saving mobs to a world save.
+    /// This is only runtime bookkeeping for kill credit, so it's fine for it to start empty after a load.
+    /// </remarks>
+    [ViewVariables]
     public Dictionary<KillSource, FixedPoint2> LifetimeDamage = new();
 }
 

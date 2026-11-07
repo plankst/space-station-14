@@ -15,7 +15,9 @@ public sealed partial class MobStateActionsSystem : EntitySystem
     public override void Initialize()
     {
         SubscribeLocalEvent<MobStateActionsComponent, MobStateChangedEvent>(OnMobStateChanged);
-        SubscribeLocalEvent<MobStateComponent, ComponentInit>(OnMobStateComponentInit);
+        // MapInit rather than ComponentInit, so a mob loaded from a world save keeps its saved actions instead of
+        // having them deleted and re-created while it is still being loaded.
+        SubscribeLocalEvent<MobStateActionsComponent, MapInitEvent>(OnMapInit);
     }
 
     private void OnMobStateChanged(EntityUid uid, MobStateActionsComponent component, MobStateChangedEvent args)
@@ -23,12 +25,12 @@ public sealed partial class MobStateActionsSystem : EntitySystem
         ComposeActions(uid, component, args.NewMobState);
     }
 
-    private void OnMobStateComponentInit(EntityUid uid, MobStateComponent component, ComponentInit args)
+    private void OnMapInit(EntityUid uid, MobStateActionsComponent component, MapInitEvent args)
     {
-        if (!TryComp<MobStateActionsComponent>(uid, out var mobStateActionsComp))
+        if (!TryComp<MobStateComponent>(uid, out var mobState))
             return;
 
-        ComposeActions(uid, mobStateActionsComp, component.CurrentState);
+        ComposeActions(uid, component, mobState.CurrentState);
     }
 
     /// <summary>

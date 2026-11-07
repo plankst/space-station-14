@@ -16,7 +16,6 @@ public abstract partial class SharedXenoArtifactSystem : EntitySystem
     [Dependency] private IGameTiming _timing = default!;
     [Dependency] private INetManager _net = default!;
     [Dependency] protected IRobustRandom RobustRandom = default!;
-    [Dependency] private SharedActionsSystem _actions = default!;
     [Dependency] private SharedContainerSystem _container = default!;
     [Dependency] private SharedPopupSystem _popup = default!;
 
@@ -54,7 +53,6 @@ public abstract partial class SharedXenoArtifactSystem : EntitySystem
     /// <summary> As all artifacts have to contain nodes - we ensure that they are containers. </summary>
     private void OnStartup(Entity<XenoArtifactComponent> ent, ref ComponentStartup args)
     {
-        _actions.AddAction(ent, ent.Comp.SelfActivateAction);
         ent.Comp.NodeContainer = _container.EnsureContainer<Container>(ent, XenoArtifactComponent.NodeContainerId);
     }
 

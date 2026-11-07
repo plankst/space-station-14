@@ -24,6 +24,14 @@ public sealed partial class ClockSystem : SharedClockSystem
 
     private void OnRoundStart(RoundStartingEvent ev)
     {
+        // A world loaded from a persistence save already has a time manager; keep its time instead of making a new one.
+        var query = EntityQueryEnumerator<GlobalTimeManagerComponent>();
+        if (query.MoveNext(out var existing, out _))
+        {
+            _pvsOverride.AddGlobalOverride(existing);
+            return;
+        }
+
         var manager = Spawn();
         AddComp<GlobalTimeManagerComponent>(manager);
     }

@@ -35,7 +35,8 @@ public sealed partial class CluwneSystem : EntitySystem
     {
         base.Initialize();
 
-        SubscribeLocalEvent<CluwneComponent, ComponentStartup>(OnComponentStartup);
+        // MapInit rather than ComponentStartup, so a cluwne loaded from a world save isn't transformed (and re-dressed) again.
+        SubscribeLocalEvent<CluwneComponent, MapInitEvent>(OnMapInit);
         SubscribeLocalEvent<CluwneComponent, MobStateChangedEvent>(OnMobState);
         SubscribeLocalEvent<CluwneComponent, EmoteEvent>(OnEmote, before:
         new[] { typeof(VocalSystem), typeof(BodyEmotesSystem) });
@@ -58,9 +59,9 @@ public sealed partial class CluwneSystem : EntitySystem
     }
 
     /// <summary>
-    /// OnStartup gives the cluwne outfit, ensures clumsy, and makes sure emote sounds are laugh.
+    /// On map init gives the cluwne outfit, ensures clumsy, and makes sure emote sounds are laugh.
     /// </summary>
-    private void OnComponentStartup(Entity<CluwneComponent> ent, ref ComponentStartup args)
+    private void OnMapInit(Entity<CluwneComponent> ent, ref MapInitEvent args)
     {
         if (ent.Comp.EmoteSoundsId == null)
             return;

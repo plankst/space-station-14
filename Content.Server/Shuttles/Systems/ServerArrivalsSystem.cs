@@ -226,6 +226,10 @@ public sealed partial class ServerArrivalsSystem : ArrivalsSystem
         if (!Enabled)
             return;
 
+        // A world loaded from a persistence save already has its arrivals terminal.
+        if (TryGetArrivals(out _))
+            return;
+
         SetupArrivalsStation();
     }
 

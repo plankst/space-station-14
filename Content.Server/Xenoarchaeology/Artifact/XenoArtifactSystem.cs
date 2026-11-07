@@ -1,3 +1,4 @@
+using Content.Shared.Actions;
 using Content.Shared.Cargo;
 using Content.Shared.Xenoarchaeology.Artifact;
 using Content.Shared.Xenoarchaeology.Artifact.Components;
@@ -7,6 +8,8 @@ namespace Content.Server.Xenoarchaeology.Artifact;
 /// <inheritdoc cref="SharedXenoArtifactSystem"/>
 public sealed partial class XenoArtifactSystem : SharedXenoArtifactSystem
 {
+    [Dependency] private SharedActionsSystem _actionsSystem = default!;
+
     /// <inheritdoc/>
     public override void Initialize()
     {
@@ -18,6 +21,10 @@ public sealed partial class XenoArtifactSystem : SharedXenoArtifactSystem
 
     private void OnArtifactMapInit(Entity<XenoArtifactComponent> ent, ref MapInitEvent args)
     {
+        // Done on MapInit rather than ComponentStartup, so an artifact loaded from a world save doesn't get another
+        // copy of the action every time it is loaded.
+        _actionsSystem.AddAction(ent, ent.Comp.SelfActivateAction);
+
         if (ent.Comp.IsGenerationRequired)
             GenerateArtifactStructure(ent);
     }

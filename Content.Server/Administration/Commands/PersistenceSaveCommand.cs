@@ -1,3 +1,4 @@
+using Content.Server.GameTicking.Persistence;
 using Content.Shared.Administration;
 using Content.Shared.CCVar;
 using Robust.Shared.Configuration;
@@ -14,12 +15,36 @@ public sealed partial class PersistenceSave : LocalizedEntityCommands
     [Dependency] private IConfigurationManager _config = default!;
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private MapLoaderSystem _mapLoader = default!;
+    [Dependency] private WorldPersistenceSystem _worldPersistence = default!;
 
     public override string Command => "persistencesave";
 
     public override void Execute(IConsoleShell shell, string argStr, string[] args)
     {
-        if (args.Length < 1 || args.Length > 2)
+        // No arguments: save the whole world to the world save file.
+        if (args.Length == 0)
+        {
+            if (!_worldPersistence.Enabled)
+            {
+                shell.WriteError(Loc.GetString("cmd-persistencesave-world-disabled", ("cvar", CCVars.UsePersistence.Name)));
+                return;
+            }
+
+            if (!_worldPersistence.CanSave())
+            {
+                shell.WriteError(Loc.GetString("cmd-persistencesave-world-no-round"));
+                return;
+            }
+
+            if (_worldPersistence.SaveWorld($"persistencesave command by {shell.Player?.Name ?? "server console"}"))
+                shell.WriteLine(Loc.GetString("cmd-persistencesave-world-success", ("path", _worldPersistence.SavePath.ToString())));
+            else
+                shell.WriteError(Loc.GetString("cmd-persistencesave-world-failed"));
+
+            return;
+        }
+
+        if (args.Length > 2)
         {
             shell.WriteError(Loc.GetString("shell-wrong-arguments-number"));
             return;

@@ -10,6 +10,7 @@ using Content.Server.Discord.DiscordLink;
 using Content.Server.EUI;
 using Content.Server.FeedbackSystem;
 using Content.Server.GameTicking;
+using Content.Server.GameTicking.Persistence;
 using Content.Server.GhostKick;
 using Content.Server.GuideGenerator;
 using Content.Server.Info;
@@ -189,6 +190,23 @@ namespace Content.Server.Entry
                     _watchlistWebhookManager.Update();
                     _connection.Update();
                     break;
+            }
+        }
+
+        public override void Shutdown()
+        {
+            base.Shutdown();
+
+            // Save the persistent world while all entities still exist (they're deleted right after this).
+            try
+            {
+                var persistence = _entSys.GetEntitySystem<WorldPersistenceSystem>();
+                if (persistence.CanSave())
+                    persistence.SaveWorld("server shutdown");
+            }
+            catch (Exception e)
+            {
+                _log.GetSawmill("persistence").Error($"Failed to save world on shutdown: {e}");
             }
         }
 

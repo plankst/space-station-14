@@ -2,6 +2,7 @@ using Content.Shared.Implants.Components;
 using Content.Shared.Store;
 using Content.Shared.Store.Components;
 using Content.Shared.UserInterface;
+using Robust.Shared.Map.Events;
 using Robust.Shared.Utility;
 
 namespace Content.Server.Store.Systems;
@@ -20,6 +21,7 @@ public sealed partial class StoreSystem : SharedStoreSystem
         SubscribeLocalEvent<StoreComponent, ComponentShutdown>(OnShutdown);
 
         SubscribeLocalEvent<RemoteStoreComponent, OpenUplinkImplantEvent>(OnImplantActivate);
+        SubscribeLocalEvent<BeforeSerializationEvent>(OnBeforeSerialization);
 
         InitializeUi();
         InitializeCommand();
@@ -34,6 +36,19 @@ public sealed partial class StoreSystem : SharedStoreSystem
         // Add the bui key if it does not exist already (the check is needed to make sure that we don't overwrite existing InterfaceData).
         if (!UI.HasUi(uid, StoreUiKey.Key))
             UI.SetUi(uid, StoreUiKey.Key, new InterfaceData("StoreBoundUserInterface", requireInputValidation: component.InputValidation));
+    }
+
+    /// <summary>
+    /// A store's starting map may have been deleted since (e.g. a temporary map it was spawned on).
+    /// Clear the dead reference before saving, so loading the save doesn't log errors about it.
+    /// </summary>
+    private void OnBeforeSerialization(BeforeSerializationEvent ev)
+    {
+        foreach (var uid in ev.Entities)
+        {
+            if (TryComp<StoreComponent>(uid, out var store) && store.StartingMap is { } map && !Exists(map))
+                store.StartingMap = null;
+        }
     }
 
     private void OnStartup(EntityUid uid, StoreComponent component, ComponentStartup args)
