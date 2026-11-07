@@ -121,16 +121,42 @@ public sealed partial class ServerStationSystem : Shared.Station.Systems.Station
     private void OnPostGameMapLoad(PostGameMapLoad ev)
     {
         var dict = new Dictionary<string, List<EntityUid>>();
+        var restoredGrids = 0;
+        var staleStations = new HashSet<EntityUid>();
 
         // Iterate over all BecomesStation
         foreach (var grid in ev.Grids)
         {
+            // Grids restored from a persistence save may already belong to the station that was saved with them.
+            if (TryComp<StationMemberComponent>(grid, out var member) &&
+                member.Station.IsValid() &&
+                HasComp<StationDataComponent>(member.Station))
+            {
+                // Only keep the restored station if it can actually be used to spawn players.
+                if (HasComp<StationJobsComponent>(member.Station) &&
+                    HasComp<StationSpawningComponent>(member.Station))
+                {
+                    restoredGrids++;
+                    continue;
+                }
+
+                // Otherwise it is a leftover from the save; replace it with a freshly initialized station below.
+                staleStations.Add(member.Station);
+            }
+
             // We still setup the grid
             if (TryComp<BecomesStationComponent>(grid, out var becomesStation))
                 dict.GetOrNew(becomesStation.Id).Add(grid);
         }
 
-        if (!dict.Any())
+        // Delete stale stations now (not queued), so their shutdown doesn't strip the membership of the new station.
+        foreach (var stale in staleStations)
+        {
+            _sawmill.Warning($"Replacing unusable station {ToPrettyString(stale)} restored from a persistence save.");
+            Del(stale);
+        }
+
+        if (!dict.Any() && restoredGrids == 0)
         {
             // Oh jeez, no stations got loaded.
             // We'll yell about it, but the thing this used to do with creating a dummy is kinda pointless now.

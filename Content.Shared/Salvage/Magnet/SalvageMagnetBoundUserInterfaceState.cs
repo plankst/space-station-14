@@ -9,7 +9,7 @@ public sealed class SalvageMagnetBoundUserInterfaceState : BoundUserInterfaceSta
     public TimeSpan NextOffer;
 
     public TimeSpan Cooldown;
-    public TimeSpan Duration;
+    public TimeSpan Duration; //try to change this
 
     public int ActiveSeed;
 

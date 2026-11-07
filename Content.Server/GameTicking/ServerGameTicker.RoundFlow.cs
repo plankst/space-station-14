@@ -122,7 +122,9 @@ public sealed partial class ServerGameTicker
         for (var i = 0; i < maps.Count; i++)
         {
             LoadGameMap(maps[i], out var mapId);
-            DebugTools.Assert(!Map.IsInitialized(mapId));
+            // Persistence saves are written post-MapInit, so they legitimately load already initialized.
+            DebugTools.Assert(!Map.IsInitialized(mapId) || Cfg.GetCVar(CCVars.UsePersistence),
+                "A freshly loaded game map should not be initialized yet (unless it was restored from a persistence save).");
 
             if (i == 0)
                 DefaultMap = mapId;
@@ -394,7 +396,9 @@ public sealed partial class ServerGameTicker
         }
 
         // MapInitialize *before* spawning players, our codebase is too shit to do it afterwards...
-        Map.InitializeMap(DefaultMap);
+        // A map restored from a persistence save was saved after MapInit, so it comes back already initialized.
+        if (!Map.IsInitialized(DefaultMap))
+            Map.InitializeMap(DefaultMap);
 
         SpawnPlayers(readyPlayers, readyPlayerProfiles, force);
 

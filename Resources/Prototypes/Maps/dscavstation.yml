@@ -1,0 +1,15 @@
+- type: gameMap
+  id: dScavStation
+  mapName: 'dScavStation'
+  mapPath: /Maps/dscavstation.yml
+  minPlayers: 0
+  maxPlayers: 30
+  stations:
+    dScavStation:
+      stationProto: StandardNanotrasenStation
+      components:
+      - type: StationNameSetup
+        mapNameTemplate: 'Scav Station'
+      - type: StationJobs
+        availableJobs:
+            Captain: [ -1, -1 ]
