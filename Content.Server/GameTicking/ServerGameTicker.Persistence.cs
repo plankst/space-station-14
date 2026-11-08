@@ -15,6 +15,7 @@ public sealed partial class ServerGameTicker
     [Dependency] private WorldPersistenceSystem _worldPersistence = default!;
     [Dependency] private PersistentPlayerFixSystem _playerFix = default!;
     [Dependency] private PersistentDispenserFixSystem _dispenserFix = default!;
+    [Dependency] private PersistentExpeditionFixSystem _expeditionFix = default!;
 
     /// <summary>
     /// True if the current round's world was loaded from the world save instead of a fresh map.
@@ -38,6 +39,9 @@ public sealed partial class ServerGameTicker
         DefaultMap = mapId;
         WorldRestoredFromSave = true;
         RelinkLoadedMinds();
+
+        // Expeditions and FTL travel don't survive a save; clean up their leftovers.
+        _expeditionFix.FixAfterLoad();
 
         // TEMPORARY workaround for players who can't move after loading (game.temp_playerfix).
         if (_playerFix.Enabled)
@@ -116,8 +120,8 @@ public sealed partial class ServerGameTicker
         if (!_worldPersistence.CanSave())
             return;
 
-        // Items held in hands don't survive a save, so put them on the floor first.
-        _worldPersistence.DropPlayersHeldItems();
+        // Bring players home from expeditions and put held items on the floor first.
+        _worldPersistence.PrepareForFinalSave();
         _worldPersistence.SaveWorld("round restart");
     }
 }

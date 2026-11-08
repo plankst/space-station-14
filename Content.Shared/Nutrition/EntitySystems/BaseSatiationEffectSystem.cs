@@ -43,8 +43,23 @@ public abstract partial class BaseSatiationEffectSystem<TComp, T> : EntitySystem
     {
         base.Initialize();
 
+        SubscribeLocalEvent<TComp, ComponentStartup>(OnStartup);
         SubscribeLocalEvent<TComp, MapInitEvent>(OnMapInit);
         SubscribeLocalEvent<TComp, SatiationUpdateEvent>(OnSatiationUpdate);
+    }
+
+    // The maintained value isn't saved, and entities loaded from a save never get MapInit. Without this it stays at
+    // default(T) after loading (e.g. a speed modifier of 0, so the mob can't walk) until the next projected threshold
+    // time, which is an absolute time that a freshly started server may not reach for a long while.
+    private void OnStartup(Entity<TComp> entity, ref ComponentStartup args)
+    {
+        if (!_satiationQuery.TryComp(entity, out var comp))
+            return;
+
+        foreach (var type in GetThresholds(entity.Comp).Keys)
+        {
+            UpdateSatiation(entity, comp, type);
+        }
     }
 
     /// <inheritdoc/>

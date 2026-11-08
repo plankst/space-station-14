@@ -1,6 +1,8 @@
+using System.Linq;
 using System.Threading.Tasks;
 using System.Diagnostics.CodeAnalysis;
 using Content.Server.Procedural;
+using Content.Server.Salvage.Expeditions;
 using Content.Shared.CCVar;
 using Content.Shared.GameTicking;
 using Content.Shared.GameTicking.Components;
@@ -8,6 +10,7 @@ using Content.Shared.Hands.Components;
 using Content.Shared.Hands.EntitySystems;
 using Content.Shared.Inventory.VirtualItem;
 using Content.Shared.Mind;
+using Content.Shared.Shuttles.Components;
 using Robust.Shared.Audio.Components;
 using Robust.Shared.Configuration;
 using Robust.Shared.ContentPack;
@@ -46,6 +49,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private SharedUserInterfaceSystem _ui = default!;
     [Dependency] private SharedHandsSystem _hands = default!;
+    [Dependency] private IDependencyCollection _dependency = default!;
 
     private bool _enabled;
     private ResPath _savePath;
@@ -56,6 +60,11 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// True while <see cref="SaveWorld"/> is serializing, so we only filter entities out of our own saves.
     /// </summary>
     private bool _saving;
+
+    /// <summary>
+    /// FTL sound references cleared for the duration of a save (see <see cref="OnBeforeSerialization"/>).
+    /// </summary>
+    private readonly List<(FTLComponent Ftl, EntityUid? Startup, EntityUid? Travel)> _hiddenFtlSounds = new();
 
     /// <summary>
     /// A save that is still being written to disk in the background.
@@ -164,6 +173,17 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     }
 
     /// <summary>
+    /// Run right before the shutdown / round restart save: brings players home from salvage expeditions (which aren't
+    /// saved) and drops held items on the floor (they don't survive a save in hands).
+    /// </summary>
+    public void PrepareForFinalSave()
+    {
+        // Expeditions aren't saved, so bring everyone on one back home first.
+        EntityManager.System<PersistentExpeditionFixSystem>().BringPlayersHomeFromExpeditions();
+        DropPlayersHeldItems();
+    }
+
+    /// <summary>
     /// Drops whatever players are holding onto the floor at their feet. Items held in hands don't survive a world
     /// save, so this is done right before the shutdown save to keep them in the world.
     /// </summary>
@@ -251,7 +271,8 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         _saving = true;
         try
         {
-            return _loader.TrySerializeAllEntities(out data, options);
+            data = SerializeAllEntities(options);
+            return true;
         }
         catch (Exception e)
         {
@@ -262,11 +283,94 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         {
             _saving = false;
 
+            foreach (var (ftl, startup, travel) in _hiddenFtlSounds)
+            {
+                ftl.StartupStream = startup;
+                ftl.TravelStream = travel;
+            }
+
+            _hiddenFtlSounds.Clear();
+
             foreach (var proto in unsavable)
             {
                 proto.MapSavable = false;
             }
         }
+    }
+
+    /// <summary>
+    /// Same as <see cref="MapLoaderSystem.TrySerializeAllEntities"/>, but survives entities that fail to serialize.
+    /// </summary>
+    /// <remarks>
+    /// The engine is meant to skip an entity that throws while being saved, but it doesn't fully clean up after
+    /// entities without a prototype (maps, most grids). That crashes the whole save
+    /// (KeyNotFoundException in EntitySerializer.WriteEntitySection), losing everything since the last save.
+    /// So if anything fails, we save again from scratch, leaving out the failed entities and everything on them.
+    /// </remarks>
+    private MappingDataNode SerializeAllEntities(SerializationOptions options)
+    {
+        options.Category = FileCategory.Save;
+
+        var serializer = RunSerializer(options, null);
+        if (serializer.ErroringEntities.Count == 0)
+            return Finish(serializer);
+
+        var failed = serializer.ErroringEntities.ToHashSet();
+        Log.Error($"{failed.Count} entities failed to save (see the errors above). " +
+                  "Saving again without them and anything on them.");
+
+        serializer = RunSerializer(options, failed);
+        if (serializer.ErroringEntities.Count > 0)
+            throw new Exception($"{serializer.ErroringEntities.Count} entities still failed to save on the second try.");
+
+        return Finish(serializer);
+
+        MappingDataNode Finish(EntitySerializer s)
+        {
+            var data = s.Write();
+            RaiseLocalEvent(new AfterSerializationEvent(s.EntityData.Values.Select(e => e.Uid).ToHashSet(), data, FileCategory.Save));
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// Serializes every savable entity, except <paramref name="exclude"/> and their children.
+    /// </summary>
+    private EntitySerializer RunSerializer(SerializationOptions options, HashSet<EntityUid>? exclude)
+    {
+        var entities = EntityManager.GetEntities().ToHashSet();
+        var mapIds = new HashSet<MapId>();
+        var mapQuery = AllEntityQuery<MapComponent>();
+        while (mapQuery.MoveNext(out var map))
+        {
+            mapIds.Add(map.MapId);
+        }
+
+        var serializer = new EntitySerializer(_dependency, options);
+
+        // Drop entities that can't be saved at all (and their children), like the engine does.
+        var toRemove = new Queue<EntityUid>();
+        foreach (var uid in entities)
+        {
+            if (exclude?.Contains(uid) == true || !serializer.IsSerializable(uid))
+                toRemove.Enqueue(uid);
+        }
+
+        while (toRemove.TryDequeue(out var uid))
+        {
+            if (!entities.Remove(uid))
+                continue;
+
+            var children = Transform(uid).ChildEnumerator;
+            while (children.MoveNext(out var child))
+            {
+                toRemove.Enqueue(child);
+            }
+        }
+
+        RaiseLocalEvent(new BeforeSerializationEvent(entities, mapIds, FileCategory.Save));
+        serializer.SerializeEntities(entities);
+        return serializer;
     }
 
     /// <summary>
@@ -444,6 +548,8 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         // - Game rules are started fresh from the game preset every time the world is loaded.
         // - Sounds and audio presets are short lived / re-created by the audio system.
         // - Dungeon atlas maps are a cache of map files; the dungeon system deletes and re-creates them every round.
+        // - Salvage expeditions keep most of their state in runtime-only fields, so they don't survive a load
+        //   (see PersistentExpeditionFixSystem).
         var toRemove = new Queue<EntityUid>();
         foreach (var uid in ev.Entities)
         {
@@ -452,19 +558,18 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
                 HasComp<AudioPresetComponent>(uid) ||
                 HasComp<AudioAuxiliaryComponent>(uid) ||
                 HasComp<AudioEffectComponent>(uid) ||
-                HasComp<DungeonAtlasTemplateComponent>(uid))
+                HasComp<DungeonAtlasTemplateComponent>(uid) ||
+                HasComp<SalvageExpeditionComponent>(uid))
             {
                 toRemove.Enqueue(uid);
             }
         }
 
-        var removed = new HashSet<EntityUid>();
         while (toRemove.TryDequeue(out var uid))
         {
             if (!ev.Entities.Remove(uid))
                 continue;
 
-            removed.Add(uid);
             var children = Transform(uid).ChildEnumerator;
             while (children.MoveNext(out var child))
             {
@@ -472,21 +577,43 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             }
         }
 
-        if (removed.Count == 0)
-            return;
-
         // Maps and grids keep some of their data in "chunk" entities that live in null-space rather than as children.
-        // Drop the chunks that belong to anything we just removed, so they don't point at entities missing from the save.
+        // Drop the chunks whose map/grid isn't being saved, so they don't point at entities missing from the save.
         var chunks = new List<EntityUid>();
         foreach (var uid in ev.Entities)
         {
-            if (TryComp<ChunkEntityComponent>(uid, out var chunk) && removed.Contains(chunk.Root))
+            if (TryComp<ChunkEntityComponent>(uid, out var chunk) && !ev.Entities.Contains(chunk.Root))
                 chunks.Add(uid);
         }
 
         foreach (var uid in chunks)
         {
             ev.Entities.Remove(uid);
+        }
+
+        // Coordinates disks pointing at something that isn't being saved (e.g. a finished salvage expedition) would be
+        // saved as an invalid reference and log an error on load. They'd be blank after loading anyway, so blank them now.
+        var disks = AllEntityQuery<ShuttleDestinationCoordinatesComponent>();
+        while (disks.MoveNext(out var disk, out var diskComp))
+        {
+            if (diskComp.Destination is not { } destination || ev.Entities.Contains(destination))
+                continue;
+
+            diskComp.Destination = null;
+            Dirty(disk, diskComp);
+        }
+
+        // A shuttle mid-FTL points at its sounds, which aren't saved. Leave those references out of the save (they'd
+        // log errors on load) but keep them in the running game, so the sounds can still be stopped on arrival.
+        var ftls = AllEntityQuery<FTLComponent>();
+        while (ftls.MoveNext(out var ftl))
+        {
+            if (ftl.StartupStream == null && ftl.TravelStream == null)
+                continue;
+
+            _hiddenFtlSounds.Add((ftl, ftl.StartupStream, ftl.TravelStream));
+            ftl.StartupStream = null;
+            ftl.TravelStream = null;
         }
     }
 

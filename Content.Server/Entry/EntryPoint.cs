@@ -203,8 +203,8 @@ namespace Content.Server.Entry
                 var persistence = _entSys.GetEntitySystem<WorldPersistenceSystem>();
                 if (persistence.CanSave())
                 {
-                    // Items held in hands don't survive a save, so put them on the floor first.
-                    persistence.DropPlayersHeldItems();
+                    // Bring players home from expeditions and put held items on the floor first.
+                    persistence.PrepareForFinalSave();
                     persistence.SaveWorld("server shutdown");
                 }
             }

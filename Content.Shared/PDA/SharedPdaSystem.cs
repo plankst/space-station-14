@@ -16,6 +16,7 @@ namespace Content.Shared.PDA
             base.Initialize();
 
             SubscribeLocalEvent<PdaComponent, ComponentInit>(OnComponentInit);
+            SubscribeLocalEvent<PdaComponent, ComponentStartup>(OnComponentStartup);
             SubscribeLocalEvent<PdaComponent, ComponentRemove>(OnComponentRemove);
 
             SubscribeLocalEvent<PdaComponent, EntInsertedIntoContainerMessage>(OnItemInserted);
@@ -32,6 +33,17 @@ namespace Content.Shared.PDA
             ItemSlotsSystem.AddItemSlot(uid, PdaComponent.PdaPenSlotId, pda.PenSlot);
             ItemSlotsSystem.AddItemSlot(uid, PdaComponent.PdaPaiSlotId, pda.PaiSlot);
 
+            UpdatePdaAppearance(uid, pda);
+        }
+
+        // ContainedId isn't saved, and no insert event happens for an ID that's already in the PDA when it's loaded
+        // from a save. Without this the PDA doesn't report its ID, so doors etc. don't see the ID's access.
+        private void OnComponentStartup(EntityUid uid, PdaComponent pda, ComponentStartup args)
+        {
+            if (pda.IdSlot.Item is not { } id || pda.ContainedId == id)
+                return;
+
+            pda.ContainedId = id;
             UpdatePdaAppearance(uid, pda);
         }
 

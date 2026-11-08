@@ -52,8 +52,9 @@ public sealed partial class SalvageExpeditionComponent : SharedSalvageExpedition
     };
 
     /// <summary>
-    /// Song selected on MapInit so we can predict the audio countdown properly.
+    /// Song selected on startup so we can predict the audio countdown properly.
+    /// Not saved: resolved sounds can't be written to a save file, so it's picked again after loading.
     /// </summary>
-    [DataField]
-    public ResolvedSoundSpecifier SelectedSong;
+    [ViewVariables]
+    public ResolvedSoundSpecifier SelectedSong = default!;
 }

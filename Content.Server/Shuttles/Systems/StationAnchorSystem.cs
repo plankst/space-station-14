@@ -69,7 +69,8 @@ public sealed partial class StationAnchorSystem : EntitySystem
     {
         var transform = Transform(ent);
         var grid = transform.GridUid;
-        if (!grid.HasValue || !transform.Anchored && enabled || !Resolve(grid.Value, ref shuttleComponent))
+        // Grids without a shuttle component (e.g. one an admin made immovable) have nothing to anchor.
+        if (!grid.HasValue || !transform.Anchored && enabled || !Resolve(grid.Value, ref shuttleComponent, false))
             return;
 
         if (enabled)

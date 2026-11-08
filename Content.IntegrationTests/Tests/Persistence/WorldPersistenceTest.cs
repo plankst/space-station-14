@@ -3,6 +3,8 @@ using System.Linq;
 using Content.IntegrationTests.Fixtures;
 using Content.Server.GameTicking;
 using Content.Server.GameTicking.Persistence;
+using Content.Server.Salvage.Expeditions;
+using Content.Shared.Salvage.Expeditions;
 using Content.Shared.CCVar;
 using Content.Shared.Chemistry.Components;
 using Content.Shared.Chemistry.Components.SolutionManager;
@@ -720,14 +722,328 @@ public sealed class WorldPersistenceTest : GameTest
     /// <summary>
     /// Holds the "move right" key on the client for a second and reports whether the player's entity moved.
     /// </summary>
+    /// <summary>
+    /// Like <see cref="RestoredPlayerCanMove"/>, but the save is loaded by a brand-new server, like a real reboot.
+    /// A new server's clock starts from zero, which an in-process round restart never shows.
+    /// </summary>
+    [Test]
+    public async Task RestoredPlayerCanMoveAfterReboot()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var playerMan = server.ResolveDependency<IPlayerManager>();
+        var res = server.ResolveDependency<IResourceManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mindSys = entMan.System<SharedMindSystem>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, false);
+
+        var player = playerMan.Sessions.Single();
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            EntityUid grid = default;
+            while (gridQuery.MoveNext(out var uid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                grid = uid;
+                for (var x = -10; x <= 10; x++)
+                {
+                    for (var y = -3; y <= 3; y++)
+                    {
+                        mapSys.SetTile(uid, gridComp, new Vector2i(x, y), new Tile(1));
+                    }
+                }
+
+                break;
+            }
+
+            Assert.That(grid.IsValid(), "Test map has no grid");
+            // Gravity, so the player doesn't drift off while we wait.
+            var gravity = entMan.EnsureComponent<Content.Shared.Gravity.GravityComponent>(grid);
+            entMan.System<Content.Server.Gravity.GravitySystem>().EnableGravity(grid, gravity);
+            var body = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 0.5f, 0.5f));
+            entMan.System<MetaDataSystem>().SetEntityName(body, PlayerBodyName);
+            var mind = mindSys.CreateMind(player.UserId, PlayerBodyName);
+            mindSys.TransferTo(mind, body);
+        });
+
+        // Play for a while first, so anything saved as an absolute time is well ahead of a fresh server's clock.
+        await pair.RunTicksSync(10);
+        Assert.That(await MovesWhenWalking(pair, player), "Player can't move even before saving (test setup problem)");
+        await pair.RunTicksSync(900);
+        Assert.That(await MovesWhenWalking(pair, player), "Player can't move before saving (test setup problem)");
+
+        string save = default!;
+        await server.WaitPost(() =>
+        {
+            entMan.System<WorldPersistenceSystem>().DropPlayersHeldItems();
+            Assert.That(persistence.SaveWorld("test reboot", force: true));
+            using var reader = res.UserData.OpenText(new ResPath(SavePath));
+            save = reader.ReadToEnd();
+        });
+        var oldUserId = player.UserId.UserId.ToString();
+        await Cleanup(pair);
+
+        // "Reboot": a brand-new server and client.
+        var pair2 = await PoolManager.GetServerClient(new PoolSettings
+        {
+            DummyTicker = false,
+            Connected = true,
+            Fresh = true,
+        });
+        var server2 = pair2.Server;
+        var entMan2 = server2.ResolveDependency<IEntityManager>();
+        var ticker2 = entMan2.System<ServerGameTicker>();
+        var player2 = server2.ResolveDependency<IPlayerManager>().Sessions.Single();
+        TestContext.Out.WriteLine($"Old server tick {server.Timing.CurTick}, new server tick {server2.Timing.CurTick}");
+
+        server2.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server2.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server2.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server2.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, false);
+
+        await server2.WaitPost(() =>
+        {
+            // The test client on the new server has a different account, so give it the saved player's mind.
+            var res2 = server2.ResolveDependency<IResourceManager>();
+            res2.UserData.CreateDir(new ResPath(SavePath).Directory);
+            using var writer = res2.UserData.OpenWriteText(new ResPath(SavePath));
+            writer.Write(save.Replace(oldUserId, player2.UserId.UserId.ToString()));
+        });
+
+        await server2.WaitPost(() => ticker2.RestartRound());
+        await pair2.RunTicksSync(30);
+
+        Assert.That(ticker2.WorldRestoredFromSave, "The new server did not load the world save");
+        Assert.That(player2.AttachedEntity, Is.Not.Null, "Player was not put back into their body");
+        Assert.That(entMan2.GetComponent<MetaDataComponent>(player2.AttachedEntity!.Value).EntityName, Is.EqualTo(PlayerBodyName));
+
+        // Anything that recalculates movement speed (taking damage, picking something up...) used to leave a loaded
+        // mob at zero speed: the hunger/thirst speed modifier wasn't recalculated after loading.
+        await server2.WaitPost(() =>
+        {
+            var body2 = player2.AttachedEntity!.Value;
+            // Walk on the ground (weightless movement ignores speed modifiers).
+            var grid2 = entMan2.GetComponent<TransformComponent>(body2).GridUid!.Value;
+            var gravity2 = entMan2.EnsureComponent<Content.Shared.Gravity.GravityComponent>(grid2);
+            entMan2.System<Content.Server.Gravity.GravitySystem>().EnableGravity(grid2, gravity2);
+            entMan2.System<Content.Shared.Movement.Systems.MovementSpeedModifierSystem>().RefreshMovementSpeedModifiers(body2);
+        });
+        await pair2.RunTicksSync(2);
+        Assert.That(await MovesWhenWalking(pair2, player2), "Player can't move after their body was loaded by a new server");
+
+        await Cleanup(pair2);
+        await pair2.CleanReturnAsync();
+    }
+
+    /// <summary>
+    /// After loading, a PDA must still report the ID inside it, otherwise the player loses all door access.
+    /// Also, a coordinates disk pointing at something that's gone must not leave a broken reference in the save.
+    /// </summary>
+    [Test]
+    public async Task PdaAccessAndDisksSurviveLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var access = entMan.System<Content.Shared.Access.Systems.AccessReaderSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string bodyName = "Persistent Test Captain";
+        const string diskName = "Persistent Test Disk";
+        await server.WaitPost(() =>
+        {
+            var coords = new MapCoordinates(0, 0, ticker.DefaultMap);
+            var body = entMan.SpawnEntity("MobHuman", coords);
+            entMan.System<MetaDataSystem>().SetEntityName(body, bodyName);
+            var pda = entMan.SpawnEntity("CaptainPDA", coords);
+            Assert.That(entMan.System<Content.Shared.Inventory.InventorySystem>().TryEquip(body, pda, "id", silent: true, force: true));
+            Assert.That(access.FindAccessTags(body), Does.Contain(new ProtoId<Content.Shared.Access.AccessLevelPrototype>("Captain")),
+                "Test setup: the captain should have captain access before saving");
+
+            // A disk pointing at a map that has since been deleted.
+            var gone = mapSys.CreateMap(out _);
+            var disk = entMan.SpawnEntity("CoordinatesDisk", coords);
+            entMan.System<MetaDataSystem>().SetEntityName(disk, diskName);
+            entMan.GetComponent<Content.Shared.Shuttles.Components.ShuttleDestinationCoordinatesComponent>(disk).Destination = gone;
+            entMan.DeleteEntity(gone);
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+
+        Assert.That(ticker.WorldRestoredFromSave);
+        EntityUid? body = null;
+        var tags = new List<string>();
+        var disks = -1;
+        await server.WaitPost(() =>
+        {
+            var query = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (query.MoveNext(out var uid, out var meta))
+            {
+                if (meta.EntityName == bodyName)
+                    body = uid;
+            }
+
+            if (body != null)
+                tags.AddRange(access.FindAccessTags(body.Value).Select(t => t.Id));
+
+            disks = entMan.Count<Content.Shared.Shuttles.Components.ShuttleDestinationCoordinatesComponent>();
+        });
+
+        Assert.That(body, Is.Not.Null, "The captain wasn't saved");
+        Assert.That(tags, Does.Contain("Captain"), "The ID in the PDA lost its access after loading");
+        // Coordinates disks are removed after loading (they only lead to expeditions, which aren't saved), and the
+        // broken reference must not have logged an error while loading (any error fails the test).
+        Assert.That(disks, Is.Zero);
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Salvage expeditions and FTL travel keep their state in fields that aren't saved, so:
+    /// - expeditions are left out of saves, with players and shuttles on them brought home first;
+    /// - coordinates disks are removed and expedition consoles offer fresh missions after loading;
+    /// - a shuttle saved in the middle of an FTL jump finishes it instead of being stuck in hyperspace.
+    /// </summary>
+    [Test]
+    public async Task ExpeditionsAndFtlSurviveLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var playerMan = server.ResolveDependency<IPlayerManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var mindSys = entMan.System<SharedMindSystem>();
+        var shuttleSys = entMan.System<Content.Server.Shuttles.Systems.ShuttleSystem>();
+        var stationSys = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string explorerName = "Persistent Test Explorer";
+        const string salvageShuttleName = "Persistent Test Salvage Shuttle";
+        const string cargoShuttleName = "Persistent Test Cargo Shuttle";
+        var player = playerMan.Sessions.Single();
+        EntityUid cargoShuttle = default;
+
+        await server.WaitPost(() =>
+        {
+            var station = stationSys.GetStations().First().Owner;
+            var data = entMan.EnsureComponent<SalvageExpeditionDataComponent>(station);
+            data.ActiveMission = 5;
+            data.Cooldown = true;
+
+            // An expedition with a shuttle that flew there and a player standing on it.
+            var expedition = mapSys.CreateMap(out var expeditionMapId);
+            var expeditionComp = entMan.AddComponent<SalvageExpeditionComponent>(expedition);
+            expeditionComp.Station = station;
+            expeditionComp.EndTime = server.Timing.CurTime + TimeSpan.FromHours(1);
+            var salvageShuttle = MakeShuttle(expeditionMapId, salvageShuttleName);
+            var explorer = entMan.SpawnEntity("MobHuman", new MapCoordinates(30, 30, expeditionMapId));
+            entMan.System<MetaDataSystem>().SetEntityName(explorer, explorerName);
+            var mind = mindSys.CreateMind(player.UserId, explorerName);
+            mindSys.TransferTo(mind, explorer);
+
+            var disk = entMan.SpawnEntity("CoordinatesDisk", new MapCoordinates(0, 0, ticker.DefaultMap));
+            entMan.GetComponent<Content.Shared.Shuttles.Components.ShuttleDestinationCoordinatesComponent>(disk).Destination = expedition;
+
+            // A cargo shuttle that will be in the middle of an FTL jump when the world is saved.
+            cargoShuttle = MakeShuttle(ticker.DefaultMap, cargoShuttleName);
+            entMan.System<SharedTransformSystem>().SetWorldPosition(cargoShuttle, new System.Numerics.Vector2(200, 200));
+            shuttleSys.FTLToCoordinates(cargoShuttle, entMan.GetComponent<Content.Shared.Shuttles.Components.ShuttleComponent>(cargoShuttle),
+                new EntityCoordinates(mapSys.GetMap(ticker.DefaultMap), 300, 300), Angle.Zero, startupTime: 0.1f, hyperspaceTime: 600f);
+        });
+        await pair.RunTicksSync(30);
+
+        await server.WaitPost(() =>
+        {
+            var xform = entMan.GetComponent<TransformComponent>(cargoShuttle);
+            Assert.That(entMan.HasComponent<Content.Shared.Shuttles.Components.FTLMapComponent>(xform.MapUid),
+                "Test setup: the cargo shuttle should be in hyperspace before saving");
+        });
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            Assert.That(entMan.Count<SalvageExpeditionComponent>(), Is.Zero, "Expeditions should not be saved");
+            Assert.That(entMan.Count<Content.Shared.Shuttles.Components.ShuttleDestinationCoordinatesComponent>(), Is.Zero,
+                "Coordinates disks should be removed after loading");
+
+            var station = stationSys.GetStations().First().Owner;
+            var data = entMan.GetComponent<SalvageExpeditionDataComponent>(station);
+            Assert.That(data.ActiveMission, Is.Zero);
+            Assert.That(data.Cooldown, Is.False);
+            Assert.That(data.Missions, Is.Not.Empty, "The expedition console should offer fresh missions");
+
+            var found = new Dictionary<string, EntityUid>();
+            var query = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (query.MoveNext(out var uid, out var meta))
+            {
+                if (meta.EntityName.StartsWith(explorerName))
+                    found[explorerName] = uid;
+                else if (meta.EntityName == salvageShuttleName || meta.EntityName == cargoShuttleName)
+                    found[meta.EntityName] = uid;
+            }
+
+            Assert.That(found.Keys, Is.EquivalentTo(new[] { explorerName, salvageShuttleName, cargoShuttleName }));
+            foreach (var (name, uid) in found)
+            {
+                Assert.That(entMan.GetComponent<TransformComponent>(uid).MapID, Is.EqualTo(ticker.DefaultMap),
+                    $"{name} should be on the main map after loading");
+            }
+        });
+
+        await Cleanup(pair);
+        return;
+
+        EntityUid MakeShuttle(MapId mapId, string name)
+        {
+            var grid = mapSys.CreateGridEntity(mapId);
+            for (var x = 0; x < 3; x++)
+            {
+                for (var y = 0; y < 3; y++)
+                {
+                    mapSys.SetTile(grid, new Vector2i(x, y), new Tile(1));
+                }
+            }
+
+            entMan.EnsureComponent<Content.Shared.Shuttles.Components.ShuttleComponent>(grid);
+            entMan.System<MetaDataSystem>().SetEntityName(grid, name);
+            return grid;
+        }
+    }
+
     private static async Task<bool> MovesWhenWalking(Pair.TestPair pair, Robust.Shared.Player.ICommonSession player)
     {
         var server = pair.Server;
         var client = pair.Client;
         var entMan = server.ResolveDependency<IEntityManager>();
-        var xformSys = entMan.System<SharedTransformSystem>();
         var body = player.AttachedEntity!.Value;
-        var start = xformSys.GetWorldPosition(body);
+        // Measure relative to what the player stands on: the whole grid may be drifting through space.
+        var start = entMan.GetComponent<TransformComponent>(body).LocalPosition;
 
         var input = client.ResolveDependency<IEntityManager>().System<Robust.Client.GameObjects.InputSystem>();
         var inputMan = client.ResolveDependency<Robust.Client.Input.IInputManager>();
@@ -752,9 +1068,116 @@ public sealed class WorldPersistenceTest : GameTest
         await Press(Robust.Shared.Input.BoundKeyState.Up);
         await pair.RunTicksSync(5);
 
-        var end = xformSys.GetWorldPosition(body);
+        var end = entMan.GetComponent<TransformComponent>(body).LocalPosition;
         TestContext.Out.WriteLine($"Moved from {start} to {end}");
         return (end - start).Length() > 0.5f;
+    }
+
+    /// <summary>
+    /// An active salvage expedition used to crash every world save (its chosen song couldn't be written to the file),
+    /// which lost a whole session on a live server. Expeditions are now left out of saves entirely; the save must
+    /// still succeed with one running.
+    /// </summary>
+    [Test]
+    public async Task SalvageExpeditionSurvivesSave()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var timing = server.ResolveDependency<Robust.Shared.Timing.IGameTiming>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string expeditionName = "Persistent Test Expedition";
+        await server.WaitPost(() =>
+        {
+            var map = mapSys.CreateMap(out _);
+            entMan.System<MetaDataSystem>().SetEntityName(map, expeditionName);
+            var expedition = entMan.AddComponent<SalvageExpeditionComponent>(map);
+            expedition.EndTime = timing.CurTime + TimeSpan.FromHours(1);
+            Assert.That(expedition.SelectedSong, Is.Not.Null);
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+
+        Assert.That(ticker.WorldRestoredFromSave, "The world save failed with an active salvage expedition");
+        await server.WaitPost(() =>
+            Assert.That(entMan.Count<SalvageExpeditionComponent>(), Is.Zero, "Expeditions should not be saved"));
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// If some entity can't be saved, the save must still succeed without it (and without anything on it),
+    /// instead of failing and losing everything since the last save.
+    /// </summary>
+    [Test]
+    public async Task BrokenEntityDoesNotBreakSave()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string brokenMapName = "Persistent Test Broken Map";
+        const string goodCorgiName = "Persistent Test Good Corgi";
+        await server.WaitPost(() =>
+        {
+            // A map without a prototype that throws while being saved, with a grid and a mob on it,
+            // like the salvage expedition map in the save that failed on the live server.
+            var brokenMap = mapSys.CreateMap(out var brokenMapId);
+            entMan.System<MetaDataSystem>().SetEntityName(brokenMap, brokenMapName);
+            // Saving skips values left at their default, so it has to be set to actually be written (and throw).
+            entMan.AddComponent<UnsavableTestComponent>(brokenMap).Song = new Robust.Shared.Audio.ResolvedCollectionSpecifier("ExpeditionEnd", 0);
+            var grid = mapSys.CreateGridEntity(brokenMapId);
+            mapSys.SetTile(grid, Vector2i.Zero, new Tile(1));
+            entMan.SpawnEntity("MobCorgi", new EntityCoordinates(grid, 0.5f, 0.5f));
+
+            var goodCorgi = entMan.SpawnEntity("MobCorgi", new MapCoordinates(0, 0, ticker.DefaultMap));
+            entMan.System<MetaDataSystem>().SetEntityName(goodCorgi, goodCorgiName);
+        });
+        await pair.RunTicksSync(5);
+
+        // Saving logs errors on purpose (the broken entity), so don't fail on them.
+        var failureLevel = server.CfgMan.GetCVar(Robust.UnitTesting.RTCVars.FailureLogLevel);
+        server.CfgMan.SetCVar(Robust.UnitTesting.RTCVars.FailureLogLevel, Robust.Shared.Log.LogLevel.Fatal);
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        server.CfgMan.SetCVar(Robust.UnitTesting.RTCVars.FailureLogLevel, failureLevel);
+
+        Assert.That(ticker.WorldRestoredFromSave, "One broken entity stopped the whole world from saving");
+        await server.WaitPost(() =>
+        {
+            var names = new List<string>();
+            var query = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (query.MoveNext(out _, out var meta))
+            {
+                names.Add(meta.EntityName);
+            }
+
+            Assert.Multiple(() =>
+            {
+                // Mobs get a number added to their name, e.g. "... Corgi (586)".
+                Assert.That(names.Any(n => n.StartsWith(goodCorgiName)), "The rest of the world should still be saved");
+                Assert.That(names, Does.Not.Contain(brokenMapName), "The broken map should have been left out");
+                Assert.That(entMan.Count<UnsavableTestComponent>(), Is.Zero);
+            });
+        });
+
+        await Cleanup(pair);
     }
 
     private static Dictionary<string, int> CountPrototypes(IEntityManager entMan, List<string> protos)

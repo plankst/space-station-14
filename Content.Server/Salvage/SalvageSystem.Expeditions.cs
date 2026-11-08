@@ -31,7 +31,7 @@ public sealed partial class SalvageSystem
         SubscribeLocalEvent<SalvageExpeditionConsoleComponent, EntParentChangedMessage>(OnSalvageConsoleParent);
         SubscribeLocalEvent<SalvageExpeditionConsoleComponent, ClaimSalvageMessage>(OnSalvageClaimMessage);
 
-        SubscribeLocalEvent<SalvageExpeditionComponent, MapInitEvent>(OnExpeditionMapInit);
+        SubscribeLocalEvent<SalvageExpeditionComponent, ComponentStartup>(OnExpeditionStartup);
         SubscribeLocalEvent<SalvageExpeditionComponent, ComponentShutdown>(OnExpeditionShutdown);
         SubscribeLocalEvent<SalvageExpeditionComponent, ComponentGetState>(OnExpeditionGetState);
 
@@ -62,7 +62,7 @@ public sealed partial class SalvageSystem
         _cooldown = obj;
     }
 
-    private void OnExpeditionMapInit(EntityUid uid, SalvageExpeditionComponent component, MapInitEvent args)
+    private void OnExpeditionStartup(EntityUid uid, SalvageExpeditionComponent component, ComponentStartup args)
     {
         component.SelectedSong = _audio.ResolveSound(component.Sound);
     }
@@ -73,9 +73,12 @@ public sealed partial class SalvageSystem
 
         // First wipe any disks referencing us
         var disks = AllEntityQuery<ShuttleDestinationCoordinatesComponent>();
-        while (disks.MoveNext(out var disk, out var diskComp)
-               && diskComp.Destination == uid)
+        while (disks.MoveNext(out var disk, out var diskComp))
         {
+            // Check each disk; this used to stop at the first disk that pointed somewhere else.
+            if (diskComp.Destination != uid)
+                continue;
+
             diskComp.Destination = null;
             Dirty(disk, diskComp);
         }
