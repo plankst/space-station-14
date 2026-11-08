@@ -76,11 +76,8 @@
   parent: BaseXenoArtifactItem
   id: ComplexXenoArtifactItem
   suffix: Hand-Sized
-  components:
+  components: # Node count comes from BaseXenoArtifact (2-4 nodes).
   - type: XenoArtifact
-    nodeCount:
-      min: 9
-      max: 13
 
 - type: entity
   id: ArtifactFragment

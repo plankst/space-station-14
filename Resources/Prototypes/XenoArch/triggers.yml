@@ -1,63 +1,21 @@
+# Trimmed down so artifacts can be worked on by small or makeshift stations: only triggers that need basic tools,
+# a few common items, or a bit of violence. The other triggers are still defined below, just never rolled.
 - type: entityTable
   id: XenoArtifactTriggerDefaultTable
   table: !type:GroupSelector
     conditionsForChildren:
       - !type:ExcludeEntitiesFromContextCondition
     children:
-    - id: TriggerMusic
-    - id: TriggerHeat
-    - id: TriggerCold
-      weight: 0.5
-    - id: TriggerNoOxygen
-    - id: TriggerWater
-    - id: TriggerCO2
-      weight: 0.5
-    - id: TriggerPlasma
-      weight: 0.5
-    - id: TriggerN2O
-      weight: 0.5
-    - id: TriggerTritium
-      weight: 0.1
-    - id: TriggerAmmonia
-      weight: 0.1
-    - id: TriggerFrezon
-      weight: 0.1
-    - id: TriggerRadiation
-    - id: TriggerPressureHigh
-      weight: 0.5
-    - id: TriggerPressureLow
-    - id: TriggerExamine
-    - id: TriggerBruteDamage
-    #- id: TriggerInteraction #this one interferes with activating artifact AND brute dmg!
     - id: TriggerWrenching
-      weight: 0.5
     - id: TriggerPrying
-      weight: 0.5
     - id: TriggerScrewing
-      weight: 0.5
     - id: TriggerPulsing
-      weight: 0.5
-    - id: TriggerTimer
-      weight: 0.25
+    - id: TriggerMusic
     - id: TriggerBlood
-    - id: TriggerDeath
-    - id: TriggerMagnet
-    - id: TriggerConsumeMoney
-    - id: TriggerConsumeKnowledge
-      weight: 0.25
-    - id: TriggerConsumeCarbs
-    - id: TriggerConsumeMeat
-      weight: 0.5
-    - id: TriggerConsumeProduce
-      weight: 0.5
-    - id: TriggerInteractStamp
-    - id: TriggerInteractShock
-    - id: TriggerAttackParticleAnomaly
-    - id: TriggerAttackStaminaDamage
+    - id: TriggerBruteDamage
     - id: TriggerAttackLaser
-      weight: 0.5
-    - id: TriggerAttackParticleEngine
-      weight: 0.1
+    - id: TriggerInteractShock
+    - id: TriggerWater
 
 - type: entityTable
   id: XenoArtifactHandheldOnlyTriggerTable
@@ -67,12 +25,9 @@
     children:
     - !type:NestedSelector
       tableId: XenoArtifactTriggerDefaultTable
-      weight: 35
-    - !type:GroupSelector # Handheld exclusive
-      weight: 2
-      children:
-      - id: TriggerThrow
-      - id: TriggerMicrowave
+      weight: 10
+    - id: TriggerThrow # Handheld exclusive
+      weight: 1
 
 - type: entity
   abstract: true

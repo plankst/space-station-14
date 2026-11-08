@@ -52,9 +52,6 @@
 - type: entity
   parent: BaseXenoArtifactStructure
   id: ComplexXenoArtifact
-  components:
+  components: # Node count comes from BaseXenoArtifact (2-4 nodes).
   - type: XenoArtifact
-    nodeCount:
-      min: 9
-      max: 13
 

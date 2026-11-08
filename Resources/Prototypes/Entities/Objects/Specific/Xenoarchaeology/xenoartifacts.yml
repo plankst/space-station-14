@@ -25,6 +25,14 @@
   - type: XenoArtifact
     effectsTable: !type:NestedSelector
       tableId: XenoArtifactEffectsDefaultTable
+    # Small artifacts (2-4 nodes, any shape) so they can be worked on by small or makeshift stations.
+    # segmentSize 4 lets those nodes form one tree instead of always being split into separate pairs.
+    nodeCount:
+      min: 2
+      max: 4
+    segmentSize:
+      min: 4
+      max: 4
   - type: Damageable
   - type: Injurable
   - type: Actions
