@@ -1,3 +1,4 @@
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Diagnostics.CodeAnalysis;
@@ -49,6 +50,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private SharedUserInterfaceSystem _ui = default!;
     [Dependency] private SharedHandsSystem _hands = default!;
+    [Dependency] private Robust.Server.Player.IPlayerManager _players = default!;
     [Dependency] private IDependencyCollection _dependency = default!;
 
     private bool _enabled;
@@ -81,6 +83,21 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// </summary>
     public ResPath SavePath => _savePath;
 
+    /// <summary>
+    /// Where autosaves go (e.g. <c>World_Autosave.yml</c>), so they never replace the main save.
+    /// </summary>
+    public ResPath AutosavePath => WithSuffix("_Autosave");
+
+    /// <summary>
+    /// A copy of the main save made once when the server starts (e.g. <c>World_Backup.yml</c>).
+    /// </summary>
+    public ResPath BackupPath => WithSuffix("_Backup");
+
+    /// <summary>
+    /// Whether the start-of-server backup has been made yet.
+    /// </summary>
+    private bool _startupBackupDone;
+
     public override void Initialize()
     {
         base.Initialize();
@@ -92,7 +109,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         Subs.CVar(_cfg, CCVars.PersistenceAutosaveInterval, v =>
         {
             _autosaveInterval = TimeSpan.FromSeconds(Math.Max(0f, v));
-            _nextAutosave = _timing.RealTime + _autosaveInterval;
+            _nextAutosave = _timing.CurTime + _autosaveInterval;
         }, true);
     }
 
@@ -100,13 +117,19 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     {
         base.Update(frameTime);
 
-        if (!_enabled || _autosaveInterval <= TimeSpan.Zero || _timing.RealTime < _nextAutosave)
+        // Game time, not real time: the server pauses while empty (game.auto_pause_empty), and with real time the
+        // first player to join after a long pause would immediately trigger an autosave (and its freeze).
+        if (!_enabled || _autosaveInterval <= TimeSpan.Zero || _timing.CurTime < _nextAutosave)
             return;
 
-        _nextAutosave = _timing.RealTime + _autosaveInterval;
+        _nextAutosave = _timing.CurTime + _autosaveInterval;
+
+        // Only autosave while someone is playing; an empty server has nothing new worth the save's freeze.
+        if (_players.PlayerCount == 0)
+            return;
 
         if (CanSave())
-            SaveWorld("autosave", background: true);
+            SaveWorld("autosave", background: true, autosave: true);
     }
 
     /// <summary>
@@ -133,18 +156,21 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     }
 
     /// <summary>
-    /// Saves every entity in the game to <see cref="SavePath"/>.
+    /// Saves every entity in the game to <see cref="SavePath"/> (or <see cref="AutosavePath"/> for autosaves).
     /// The file is written to a temporary file first and then swapped in, so a crash mid-save can't corrupt the
-    /// previous save. The previous save is kept as a <c>.bak</c> file.
+    /// previous save. For the main save, the previous one is kept as a <c>.bak</c> file.
     /// </summary>
     /// <param name="reason">Shown in the logs.</param>
     /// <param name="force">Save even if <see cref="CanSave"/> says there's nothing worth saving.</param>
     /// <param name="background">
-    /// Write the file on a background thread. The world is still captured immediately on the game thread; only the
-    /// slow part (writing out the YAML) happens in the background, so the server doesn't freeze during autosaves.
+    /// Write the file on a background thread. Capturing the world still happens on the game thread (the server
+    /// pauses for that part); only writing out the YAML happens in the background.
     /// </param>
-    public bool SaveWorld(string reason, bool force = false, bool background = false)
+    /// <param name="autosave">Write to <see cref="AutosavePath"/> instead of the main save, without a <c>.bak</c>.</param>
+    public bool SaveWorld(string reason, bool force = false, bool background = false, bool autosave = false)
     {
+        var target = autosave ? AutosavePath : _savePath;
+
         if (!force && !CanSave())
         {
             Log.Info($"Skipping world save ({reason}): no round in progress.");
@@ -155,7 +181,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         WaitForPendingWrite();
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        Log.Info($"Saving world to {_savePath} ({reason})...");
+        Log.Info($"Saving world to {target} ({reason})...");
 
         if (!TrySerializeWorld(out var data))
         {
@@ -165,10 +191,11 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
         Log.Info($"Captured world state in {stopwatch.Elapsed.TotalSeconds:N2}s, writing to disk...");
 
+        var keepBackup = !autosave;
         if (!background)
-            return WriteSave(data, reason, stopwatch);
+            return WriteSave(data, reason, stopwatch, target, keepBackup);
 
-        _pendingWrite = Task.Run(() => WriteSave(data, reason, stopwatch));
+        _pendingWrite = Task.Run(() => WriteSave(data, reason, stopwatch, target, keepBackup));
         return true;
     }
 
@@ -376,14 +403,19 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// <summary>
     /// Writes captured world data to disk. Safe to run on a background thread.
     /// </summary>
-    private bool WriteSave(MappingDataNode data, string reason, System.Diagnostics.Stopwatch stopwatch)
+    private bool WriteSave(
+        MappingDataNode data,
+        string reason,
+        System.Diagnostics.Stopwatch stopwatch,
+        ResPath target,
+        bool keepBackup)
     {
-        var tmpPath = new ResPath(_savePath + ".tmp");
-        var bakPath = new ResPath(_savePath + ".bak");
+        var tmpPath = new ResPath(target + ".tmp");
+        var bakPath = new ResPath(target + ".bak");
 
         try
         {
-            _res.UserData.CreateDir(_savePath.Directory);
+            _res.UserData.CreateDir(target.Directory);
             using (var writer = _res.UserData.OpenWriteText(tmpPath))
             {
                 var document = new YamlDocument(data.ToYaml());
@@ -400,13 +432,20 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
         try
         {
-            if (_res.UserData.Exists(_savePath))
+            if (_res.UserData.Exists(target))
             {
-                TryDelete(bakPath);
-                _res.UserData.Rename(_savePath, bakPath);
+                if (keepBackup)
+                {
+                    TryDelete(bakPath);
+                    _res.UserData.Rename(target, bakPath);
+                }
+                else
+                {
+                    _res.UserData.Delete(target);
+                }
             }
 
-            _res.UserData.Rename(tmpPath, _savePath);
+            _res.UserData.Rename(tmpPath, target);
         }
         catch (Exception e)
         {
@@ -414,7 +453,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             return false;
         }
 
-        Log.Info($"World saved to {_savePath} in {stopwatch.Elapsed.TotalSeconds:N2}s ({reason}).");
+        Log.Info($"World saved to {target} in {stopwatch.Elapsed.TotalSeconds:N2}s ({reason}).");
         return true;
     }
 
@@ -435,6 +474,8 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
         if (!SaveExists())
             return false;
+
+        MakeStartupBackup();
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         Log.Info($"Loading world from {_savePath}...");
@@ -615,6 +656,42 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             ftl.StartupStream = null;
             ftl.TravelStream = null;
         }
+    }
+
+    /// <summary>
+    /// The first time the world is loaded after the server starts, copy the save to <see cref="BackupPath"/>, so
+    /// there's always a copy of the world as it was when the server came up.
+    /// </summary>
+    private void MakeStartupBackup()
+    {
+        if (_startupBackupDone)
+            return;
+
+        _startupBackupDone = true;
+        try
+        {
+            using (var source = _res.UserData.OpenRead(_savePath))
+            using (var copy = _res.UserData.Open(BackupPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                source.CopyTo(copy);
+            }
+
+            Log.Info($"Backed up {_savePath} to {BackupPath}.");
+        }
+        catch (Exception e)
+        {
+            Log.Error($"Failed to back up {_savePath} to {BackupPath}: {e}");
+        }
+    }
+
+    /// <summary>
+    /// The main save path with a suffix added to the file name, e.g. <c>World.yml</c> -> <c>World_Backup.yml</c>.
+    /// </summary>
+    private ResPath WithSuffix(string suffix)
+    {
+        var extension = _savePath.Extension;
+        var name = _savePath.FilenameWithoutExtension + suffix + (extension.Length > 0 ? "." + extension : "");
+        return _savePath.WithName(name);
     }
 
     private void TryDelete(ResPath path)

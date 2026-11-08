@@ -239,7 +239,8 @@ namespace Content.Client.Administration.UI.Bwoink
             Kick.Visible = _adminManager.CanCommand("kick");
             Kick.Disabled = !Kick.Visible || disabled;
 
-            Respawn.Visible = _adminManager.CanCommand("respawn");
+            // Anyone can run "respawn" on themselves as a ghost; respawning other players needs moderator rights.
+            Respawn.Visible = _adminManager.HasFlag(AdminFlags.Moderator);
             Respawn.Disabled = !Respawn.Visible || disabled;
 
             Follow.Visible = _adminManager.CanCommand("follow");

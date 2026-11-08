@@ -13,8 +13,6 @@ namespace Content.Server.GameTicking;
 public sealed partial class ServerGameTicker
 {
     [Dependency] private WorldPersistenceSystem _worldPersistence = default!;
-    [Dependency] private PersistentPlayerFixSystem _playerFix = default!;
-    [Dependency] private PersistentDispenserFixSystem _dispenserFix = default!;
     [Dependency] private PersistentExpeditionFixSystem _expeditionFix = default!;
 
     /// <summary>
@@ -42,14 +40,6 @@ public sealed partial class ServerGameTicker
 
         // Expeditions and FTL travel don't survive a save; clean up their leftovers.
         _expeditionFix.FixAfterLoad();
-
-        // TEMPORARY workaround for players who can't move after loading (game.temp_playerfix).
-        if (_playerFix.Enabled)
-            _playerFix.ReplacePlayerBodies();
-
-        // TEMPORARY workaround for broken reagent dispensers after loading (game.temp_dispensefix).
-        if (_dispenserFix.Enabled)
-            _dispenserFix.ReplaceDispensers();
 
         return true;
     }
