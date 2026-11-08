@@ -36,6 +36,72 @@ public sealed class XenoArtifactSimplifiedTest : GameTest
     // Only handheld artifacts can be thrown.
     private const string HandheldOnlyTrigger = "TriggerThrow";
 
+    [TestPrototypes]
+    private const string Prototypes = @"
+- type: entity
+  id: TestOldBigArtifact
+  parent: ComplexXenoArtifact
+  components:
+  - type: XenoArtifact
+    nodeCount:
+      min: 10
+      max: 12
+    segmentSize:
+      min: 5
+      max: 8
+";
+
+    /// <summary>
+    /// "regenartifacts" brings artifacts made under the old rules (e.g. from an old world save) up to date.
+    /// </summary>
+    [Test]
+    public async Task RegenerateShrinksOldArtifacts()
+    {
+        var server = Pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var artifacts = entMan.System<Content.Server.Xenoarchaeology.Artifact.XenoArtifactSystem>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var console = server.ResolveDependency<Robust.Server.Console.IServerConsoleHost>();
+
+        EntityUid uid = default;
+        await server.WaitPost(() =>
+        {
+            mapSys.CreateMap(out var mapId);
+            uid = entMan.SpawnEntity("TestOldBigArtifact", new MapCoordinates(0, 0, mapId));
+            var comp = entMan.GetComponent<XenoArtifactComponent>(uid);
+            Assert.That(artifacts.GetAllNodes((uid, comp)).Count(), Is.GreaterThan(MaxNodes), "Test setup: should start big");
+
+            // Like an old save loaded after the update: the artifact now has the new generation settings.
+            // (Set through reflection: these fields are only writable by the artifact systems.)
+            typeof(XenoArtifactComponent).GetField(nameof(XenoArtifactComponent.NodeCount))!
+                .SetValue(comp, new Content.Shared.Destructible.Thresholds.MinMax(2, 4));
+            typeof(XenoArtifactComponent).GetField(nameof(XenoArtifactComponent.SegmentSize))!
+                .SetValue(comp, new Content.Shared.Destructible.Thresholds.MinMax(4, 4));
+            console.ExecuteCommand("regenartifacts");
+        });
+        await Pair.RunTicksSync(5);
+
+        await server.WaitPost(() =>
+        {
+            var comp = entMan.GetComponent<XenoArtifactComponent>(uid);
+            var nodes = artifacts.GetAllNodes((uid, comp)).ToList();
+            Assert.That(nodes, Has.Count.InRange(1, MaxNodes));
+            Assert.That(comp.NodeVertices.Count(v => v != null), Is.EqualTo(nodes.Count));
+
+            // The old nodes are really gone, not just detached.
+            var nodeEntities = 0;
+            var query = entMan.AllEntityQueryEnumerator<XenoArtifactNodeComponent>();
+            while (query.MoveNext(out var node, out var nodeComp))
+            {
+                if (nodeComp.Attached == uid)
+                    nodeEntities++;
+            }
+
+            Assert.That(nodeEntities, Is.EqualTo(nodes.Count));
+            entMan.DeleteEntity(uid);
+        });
+    }
+
     [Test]
     [TestCase("ComplexXenoArtifact", false)]
     [TestCase("ComplexXenoArtifactItem", true)]

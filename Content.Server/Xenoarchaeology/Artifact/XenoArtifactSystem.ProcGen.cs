@@ -38,6 +38,30 @@ public sealed partial class XenoArtifactSystem
     }
 
     /// <summary>
+    /// Throws away all of an artifact's nodes and generates a fresh set, using the artifact's current generation
+    /// settings (node count, triggers, effects). Used to bring artifacts from an old world save up to date.
+    /// </summary>
+    public void RegenerateArtifact(Entity<XenoArtifactComponent> ent)
+    {
+        foreach (var node in GetAllNodes(ent).ToList())
+        {
+            RemoveNode((ent, ent), (node, node), dirty: false);
+            QueueDel(node);
+        }
+
+        // An unlock in progress refers to the old nodes.
+        RemComp<XenoArtifactUnlockingComponent>(ent);
+
+        ent.Comp.NodeVertices = [];
+        ent.Comp.NodeAdjacencyMatrix.Clear();
+        ent.Comp.CachedActiveNodes.Clear();
+        ent.Comp.CachedSegments.Clear();
+
+        GenerateArtifactStructure(ent);
+        Dirty(ent);
+    }
+
+    /// <summary>
     /// Generates segment of nodes inside artifact, layer by layer.
     /// Segment is interconnected graph of nodes.
     /// </summary>

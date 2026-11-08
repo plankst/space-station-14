@@ -1037,6 +1037,138 @@ public sealed class WorldPersistenceTest : GameTest
         await Cleanup(pair);
     }
 
+    /// <summary>
+    /// Linked devices keep working after a load: a button still opens its blast door and a lever still runs its
+    /// conveyor, used by hand the way a player would.
+    /// </summary>
+    [Test]
+    public async Task LinkedDevicesWorkAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var xformSys = entMan.System<SharedTransformSystem>();
+        var links = entMan.System<Content.Shared.DeviceLinking.Systems.DeviceLinkSystem>();
+        var interaction = entMan.System<Content.Shared.Interaction.SharedInteractionSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string userName = "Persistent Test Engineer";
+        var names = new[] { "Persistent Test Button", "Persistent Test Door", "Persistent Test Lever", "Persistent Test Conveyor" };
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                for (var x = 0; x <= 6; x++)
+                {
+                    mapSys.SetTile(grid, gridComp, new Vector2i(x, 0), new Tile(1));
+                }
+
+                EntityUid Spawn(string proto, string name, float x, bool anchor)
+                {
+                    var uid = entMan.SpawnEntity(proto, new EntityCoordinates(grid, x, 0.5f));
+                    entMan.System<MetaDataSystem>().SetEntityName(uid, name);
+                    if (anchor)
+                        xformSys.AnchorEntity(uid);
+                    return uid;
+                }
+
+                var user = Spawn("MobHuman", userName, 2.5f, false);
+                var button = Spawn("SignalButton", names[0], 1.5f, true);
+                var door = Spawn("BlastDoor", names[1], 0.5f, true);
+                var lever = Spawn("TwoWayLever", names[2], 3.5f, true);
+                var conveyor = Spawn("ConveyorBelt", names[3], 4.5f, true);
+                links.LinkDefaults(null, button, door);
+                links.LinkDefaults(null, lever, conveyor);
+                break;
+            }
+        });
+        await pair.RunTicksSync(10);
+
+        Dictionary<string, EntityUid> Find()
+        {
+            var found = new Dictionary<string, EntityUid>();
+            var q = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (q.MoveNext(out var uid, out var meta))
+            {
+                // Skip identity entities, which carry the same name as their owner.
+                if ((meta.EntityName == userName && entMan.HasComponent<Content.Shared.Inventory.InventoryComponent>(uid))
+                    || (names.Contains(meta.EntityName) && entMan.HasComponent<TransformComponent>(uid) && meta.EntityPrototype != null))
+                {
+                    found[meta.EntityName] = uid;
+                }
+            }
+
+            return found;
+        }
+
+        // Press the button and pull the lever, by hand, and report what the door and conveyor did.
+        async Task<(Content.Shared.Doors.Components.DoorState Door, Content.Shared.Conveyor.ConveyorState Conveyor)> UseDevices()
+        {
+            Dictionary<string, EntityUid> found = default!;
+            await server.WaitPost(() =>
+            {
+                found = Find();
+                Assert.That(found.Keys, Is.SupersetOf(names.Append(userName)), "Some test devices are missing");
+                interaction.InteractHand(found[userName], found[names[0]]);
+                interaction.InteractHand(found[userName], found[names[2]]);
+            });
+            await pair.RunTicksSync(5);
+
+            (Content.Shared.Doors.Components.DoorState, Content.Shared.Conveyor.ConveyorState) result = default;
+            await server.WaitPost(() => result = (
+                entMan.GetComponent<Content.Shared.Doors.Components.DoorComponent>(found[names[1]]).State,
+                entMan.GetComponent<Content.Shared.Conveyor.ConveyorComponent>(found[names[3]]).State));
+            return result;
+        }
+
+        var before = await UseDevices();
+        Assert.That(before.Door, Is.Not.EqualTo(Content.Shared.Doors.Components.DoorState.Closed), "Test setup: the button should open the door");
+        Assert.That(before.Conveyor, Is.Not.EqualTo(Content.Shared.Conveyor.ConveyorState.Off), "Test setup: the lever should start the conveyor");
+
+        // Put everything back to rest before saving, so after loading we can see the devices react again.
+        await pair.RunTicksSync(90);
+        await server.WaitPost(() =>
+        {
+            var found = Find();
+            interaction.InteractHand(found[userName], found[names[0]]);
+            interaction.InteractHand(found[userName], found[names[2]]);
+        });
+        await pair.RunTicksSync(90);
+
+        var stateBeforeSave = default((Content.Shared.Doors.Components.DoorState, Content.Shared.Conveyor.ConveyorState));
+        await server.WaitPost(() =>
+        {
+            var found = Find();
+            stateBeforeSave = (entMan.GetComponent<Content.Shared.Doors.Components.DoorComponent>(found[names[1]]).State,
+                entMan.GetComponent<Content.Shared.Conveyor.ConveyorComponent>(found[names[3]]).State);
+        });
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await pair.RunTicksSync(60);
+        var after = await UseDevices();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.Door, Is.Not.EqualTo(stateBeforeSave.Item1), "The button no longer works its blast door after loading");
+            Assert.That(after.Conveyor, Is.Not.EqualTo(stateBeforeSave.Item2), "The lever no longer works its conveyor after loading");
+        });
+
+        await Cleanup(pair);
+    }
+
     private static async Task<bool> MovesWhenWalking(Pair.TestPair pair, Robust.Shared.Player.ICommonSession player)
     {
         var server = pair.Server;

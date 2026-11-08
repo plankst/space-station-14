@@ -7,6 +7,7 @@ using Content.Server.Salvage.Expeditions;
 using Content.Shared.CCVar;
 using Content.Shared.GameTicking;
 using Content.Shared.GameTicking.Components;
+using Content.Shared.DeviceNetwork.Components;
 using Content.Shared.Hands.Components;
 using Content.Shared.Hands.EntitySystems;
 using Content.Shared.Inventory.VirtualItem;
@@ -50,6 +51,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private SharedUserInterfaceSystem _ui = default!;
     [Dependency] private SharedHandsSystem _hands = default!;
+    [Dependency] private Content.Shared.DeviceNetwork.Systems.DeviceNetworkSystem _deviceNetwork = default!;
     [Dependency] private Robust.Server.Player.IPlayerManager _players = default!;
     [Dependency] private IDependencyCollection _dependency = default!;
 
@@ -513,6 +515,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         }
 
         CloseSavedUis(result);
+        ReconnectDeviceNetworks(result);
 
         Log.Info($"Loaded world from {_savePath} in {stopwatch.Elapsed.TotalSeconds:N2}s: " +
                  $"{result.Maps.Count} maps, {result.Grids.Count} grids, {result.Entities.Count} entities.");
@@ -530,6 +533,30 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             if (TryComp<UserInterfaceComponent>(uid, out var ui) && ui.Actors.Count > 0)
                 _ui.CloseUis((uid, ui));
         }
+    }
+
+    /// <summary>
+    /// Devices only join their device network on MapInit, which loaded entities never get, and the networks themselves
+    /// aren't saved. Without this, nothing sent over a device network works after a load: e.g. a signal button no
+    /// longer opens its blast doors even though the link is still there. Devices keep their saved addresses.
+    /// </summary>
+    private void ReconnectDeviceNetworks(LoadResult result)
+    {
+        var connected = 0;
+        foreach (var uid in result.Entities)
+        {
+            if (!TryComp<DeviceNetworkComponent>(uid, out var device) || !device.AutoConnect)
+                continue;
+
+            // Entities that haven't been map-initialized yet will connect on their own when they are.
+            if (MetaData(uid).EntityLifeStage < EntityLifeStage.MapInitialized)
+                continue;
+
+            if (_deviceNetwork.ConnectDevice((uid, device)))
+                connected++;
+        }
+
+        Log.Info($"Reconnected {connected} device(s) to their device networks.");
     }
 
     /// <summary>
