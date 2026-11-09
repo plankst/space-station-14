@@ -110,4 +110,48 @@ public sealed class SmartFridgeInteractionTest : InteractionTest
         Assert.That(component.Entries, Is.Not.Empty);
         Assert.That(component.ContainedEntries[component.Entries[0]].Count, Is.EqualTo(SampleDumpableCount));
     }
+
+    /// <summary>
+    /// Dispensing one item shows one fewer on the player's screen right away, and never more. The shared sets in the
+    /// networked state used to get changed by every re-prediction, so the count ran all the way down to 0 before the
+    /// server's real count came in.
+    /// </summary>
+    [Test]
+    public async Task DispenseCountsDownByOneOnClient()
+    {
+        await PlaceInHands(SampleItemProtoId);
+
+        await SpawnTarget(SmartFridgeProtoId);
+        var fridge = SEntMan.GetEntity(Target.Value);
+        var component = SEntMan.GetComponent<SmartFridgeComponent>(fridge);
+
+        await SpawnEntity("APCBasic", SEntMan.GetCoordinates(TargetCoords));
+        await RunTicks(1);
+
+        await InteractUsing(SampleDumpableId);
+        var entry = component.Entries[0];
+        Assert.That(component.ContainedEntries[entry].Count, Is.EqualTo(SampleDumpableCount));
+
+        await Activate();
+        Assert.That(IsUiOpen(SmartFridgeUiKey.Key));
+        Assert.That(TryGetBui(SmartFridgeUiKey.Key, out var bui));
+
+        // Dispense one, the way the fridge window does it (predicted), and watch the count on the client every tick.
+        await Client.WaitPost(() => bui!.SendPredictedMessage(new SmartFridgeDispenseItemMessage(entry)));
+        var lowest = int.MaxValue;
+        var cFridge = CEntMan.GetEntity(Target.Value);
+        for (var i = 0; i < 30; i++)
+        {
+            await RunTicks(1);
+            await Client.WaitPost(() =>
+            {
+                var cComp = CEntMan.GetComponent<SmartFridgeComponent>(cFridge);
+                var count = cComp.ContainedEntries.TryGetValue(entry, out var items) ? items.Count : 0;
+                lowest = Math.Min(lowest, count);
+            });
+        }
+
+        Assert.That(lowest, Is.EqualTo(SampleDumpableCount - 1), "The fridge showed the wrong count while dispensing one item");
+        Assert.That(component.ContainedEntries[entry].Count, Is.EqualTo(SampleDumpableCount - 1), "The server didn't dispense exactly one");
+    }
 }

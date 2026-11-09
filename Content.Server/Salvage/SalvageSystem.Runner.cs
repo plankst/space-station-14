@@ -107,7 +107,8 @@ public sealed partial class SalvageSystem
         if (component.Stage != ExpeditionStage.Added)
             return;
 
-        Announce(args.MapUid, Loc.GetString("salvage-expedition-announcement-countdown-minutes", ("duration", (component.EndTime - _timing.CurTime).Minutes)));
+        // Total minutes: TimeSpan.Minutes is only the minutes part, so a 2 hour expedition announced "0 minutes".
+        Announce(args.MapUid, Loc.GetString("salvage-expedition-announcement-countdown-minutes", ("duration", (int) Math.Ceiling((component.EndTime - _timing.CurTime).TotalMinutes))));
 
         var directionLocalization = ContentLocalizationManager.FormatDirection(component.DungeonLocation.GetDir()).ToLower();
 

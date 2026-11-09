@@ -1,5 +1,6 @@
 using System.Linq;
 using Content.Server.Salvage.Expeditions;
+using Content.Server.Salvage.Magnet;
 using Content.Server.Shuttles.Systems;
 using Content.Shared.Mind.Components;
 using Content.Shared.Salvage.Expeditions;
@@ -27,6 +28,8 @@ namespace Content.Server.GameTicking.Persistence;
 /// </remarks>
 public sealed partial class PersistentExpeditionFixSystem : EntitySystem
 {
+    private static readonly Robust.Shared.Prototypes.ProtoId<Content.Shared.Roles.JobPrototype> CaptainJob = "Captain";
+
     [Dependency] private IGameTiming _timing = default!;
     [Dependency] private ServerGameTicker _ticker = default!;
     [Dependency] private ShuttleSystem _shuttle = default!;
@@ -35,6 +38,7 @@ public sealed partial class PersistentExpeditionFixSystem : EntitySystem
     [Dependency] private SharedTransformSystem _transform = default!;
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private SharedContainerSystem _container = default!;
+    [Dependency] private Content.Server.Salvage.SalvageSystem _salvage = default!;
 
     /// <summary>
     /// Brings shuttles and players on salvage expeditions back home, since expeditions aren't saved.
@@ -95,11 +99,74 @@ public sealed partial class PersistentExpeditionFixSystem : EntitySystem
     }
 
     /// <summary>
-    /// Cleans up after a world load: expedition leftovers are removed, expedition consoles start fresh, and shuttles
-    /// that were mid-FTL finish their jump.
+    /// Brings players standing on salvage the magnet pulled in (asteroids, debris, wrecks) back to their station,
+    /// since magnet salvage isn't saved. Called right before the shutdown / round restart save, and after a load.
+    /// </summary>
+    public void BringPlayersHomeFromMagnetSalvage()
+    {
+        var query = AllEntityQuery<SalvageMagnetDataComponent>();
+        while (query.MoveNext(out var station, out var data))
+        {
+            var grids = _salvage.GetActiveMagnetGrids(data);
+            if (grids.Count == 0)
+                continue;
+
+            var mobs = new List<EntityUid>();
+            var mobQuery = AllEntityQuery<MindContainerComponent, TransformComponent>();
+            while (mobQuery.MoveNext(out var mob, out var mind, out var xform))
+            {
+                if (mind.HasMind && xform.GridUid is { } grid && grids.Contains(grid))
+                    mobs.Add(mob);
+            }
+
+            if (mobs.Count == 0)
+                continue;
+
+            var home = GetHomeGrid(station);
+            if (home == null)
+            {
+                Log.Warning($"Nowhere to bring players home to from magnet salvage of {ToPrettyString(station)}");
+                continue;
+            }
+
+            foreach (var mob in mobs)
+            {
+                _container.TryRemoveFromContainer(mob, force: true);
+                _transform.SetCoordinates(mob, GetArrivalCoordinates(home.Value));
+                _transform.AttachToGridOrMap(mob);
+                Log.Info($"Brought {ToPrettyString(mob)} home from magnet salvage");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cleans up after a world load: expedition and salvage magnet leftovers are removed, expedition consoles and
+    /// salvage magnets start fresh, and shuttles that were mid-FTL finish their jump.
     /// </summary>
     public void FixAfterLoad()
     {
+        // Magnet salvage isn't saved; saves from before that may still have some pulled in. Clear it out and give
+        // every magnet fresh offers, as if it had never been used.
+        BringPlayersHomeFromMagnetSalvage();
+        var holdingMaps = new List<EntityUid>();
+        var holdingQuery = AllEntityQuery<SalvageMagnetHoldingMapComponent>();
+        while (holdingQuery.MoveNext(out var uid, out _))
+        {
+            holdingMaps.Add(uid);
+        }
+
+        foreach (var map in holdingMaps)
+        {
+            Log.Info($"Removing saved salvage magnet holding map {ToPrettyString(map)}");
+            Del(map);
+        }
+
+        var magnets = AllEntityQuery<SalvageMagnetDataComponent>();
+        while (magnets.MoveNext(out var station, out var magnetData))
+        {
+            _salvage.ResetMagnet((station, magnetData));
+        }
+
         // Saves made before expeditions were excluded may still contain them.
         BringPlayersHomeFromExpeditions();
         var maps = new List<EntityUid>();
@@ -196,22 +263,48 @@ public sealed partial class PersistentExpeditionFixSystem : EntitySystem
     }
 
     /// <summary>
-    /// A late-join spawn point on the home grid, or failing that, the middle of it.
+    /// Where players stranded on something that isn't saved (an expedition, magnet salvage) are brought back to:
+    /// the captain's spawn point on the home grid, or failing that a late-join spawn point, or failing that the floor
+    /// tile closest to the middle of the grid.
     /// </summary>
     private EntityCoordinates GetArrivalCoordinates(EntityUid home)
     {
+        EntityCoordinates? captain = null;
         var points = new List<EntityCoordinates>();
         var query = AllEntityQuery<SpawnPointComponent, TransformComponent>();
         while (query.MoveNext(out var point, out var xform))
         {
-            if (point.SpawnType == SpawnPointType.LateJoin && xform.GridUid == home)
+            if (xform.GridUid != home)
+                continue;
+
+            if (point.SpawnType == SpawnPointType.Job && point.Job == CaptainJob)
+                captain ??= xform.Coordinates;
+            else if (point.SpawnType == SpawnPointType.LateJoin)
                 points.Add(xform.Coordinates);
         }
+
+        if (captain != null)
+            return captain.Value;
 
         if (points.Count > 0)
             return points[0];
 
-        var center = Comp<MapGridComponent>(home).LocalAABB.Center;
-        return new EntityCoordinates(home, center);
+        // No arrivals spawn: the floor tile closest to the middle of the grid (the middle itself may be open space).
+        var grid = Comp<MapGridComponent>(home);
+        var center = grid.LocalAABB.Center;
+        Vector2i? best = null;
+        var bestDistance = float.MaxValue;
+        var tiles = _map.GetAllTilesEnumerator(home, grid);
+        while (tiles.MoveNext(out var tile))
+        {
+            var distance = (_map.GridTileToLocal(home, grid, tile.Value.GridIndices).Position - center).LengthSquared();
+            if (distance >= bestDistance)
+                continue;
+
+            bestDistance = distance;
+            best = tile.Value.GridIndices;
+        }
+
+        return best is { } indices ? _map.GridTileToLocal(home, grid, indices) : new EntityCoordinates(home, center);
     }
 }

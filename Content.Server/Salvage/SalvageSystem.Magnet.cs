@@ -192,6 +192,26 @@ public sealed partial class SalvageSystem
         UpdateMagnetUIs(data);
     }
 
+    /// <summary>
+    /// The grids currently pulled in by this station's magnet (asteroids, debris, wrecks and anything split off them).
+    /// </summary>
+    public IReadOnlyList<EntityUid> GetActiveMagnetGrids(SalvageMagnetDataComponent data)
+    {
+        return data.ActiveEntities ?? (IReadOnlyList<EntityUid>) Array.Empty<EntityUid>();
+    }
+
+    /// <summary>
+    /// Puts the magnet back as if it had never been used: whatever it pulled in is removed and fresh offers are
+    /// available right away. Used after loading a world save, since magnet salvage isn't saved.
+    /// Bring players off the pulled grids first; anyone left on them ends up floating in space.
+    /// </summary>
+    public void ResetMagnet(Entity<SalvageMagnetDataComponent> data)
+    {
+        EndMagnet(data);
+        data.Comp.Announced = false;
+        CreateMagnetOffers(data);
+    }
+
     private void CreateMagnetOffers(Entity<SalvageMagnetDataComponent> data)
     {
         data.Comp.Offered.Clear();
@@ -282,6 +302,7 @@ public sealed partial class SalvageSystem
 
         var offering = GetSalvageOffering(seed);
         var salvMap = _mapSystem.CreateMap();
+        EnsureComp<SalvageMagnetHoldingMapComponent>(salvMap);
         var salvMapXform = Transform(salvMap);
 
         // Set values while awaiting asteroid dungeon if relevant so we can't double-take offers.
@@ -308,6 +329,7 @@ public sealed partial class SalvageSystem
                 {
                     Report(magnet, MagnetChannel, "salvage-system-announcement-spawn-debris-disintegrated");
                     _mapSystem.DeleteMap(salvMapXform.MapID);
+                    EndMagnet(data);
                     return;
                 }
 
@@ -321,6 +343,9 @@ public sealed partial class SalvageSystem
         if (salvMapXform.ChildCount == 0)
         {
             Report(magnet.Owner, MagnetChannel, "salvage-system-announcement-spawn-no-debris-available");
+            // Used to leave the empty holding map behind (and the magnet busy) for good.
+            _mapSystem.DeleteMap(salvMapXform.MapID);
+            EndMagnet(data);
             return;
         }
 
@@ -369,13 +394,19 @@ public sealed partial class SalvageSystem
         {
             Report(magnet.Owner, MagnetChannel, "salvage-system-announcement-spawn-no-debris-available");
             _mapSystem.DeleteMap(salvMapXform.MapID);
+            EndMagnet(data);
             return;
         }
 
         // I have no idea if we want to return on failure or not
         // but I assume trying to set the parent with a null value wouldn't have worked out anyways
         if (!_mapSystem.TryGetMap(spawnLocation.MapId, out var spawnUid))
+        {
+            // Used to strand the salvage on its holding map, which then got saved into the world forever.
+            _mapSystem.DeleteMap(salvMapXform.MapID);
+            EndMagnet(data);
             return;
+        }
 
         data.Comp.ActiveEntities = null;
         mapChildren = salvMapXform.ChildEnumerator;

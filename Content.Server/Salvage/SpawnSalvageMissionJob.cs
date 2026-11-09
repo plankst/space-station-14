@@ -219,14 +219,49 @@ public sealed class SpawnSalvageMissionJob : Job<bool>
 
         // Handle remaining loot
 
+        // Random loot goes in before the mobs, so mobs don't end up inside loot that lands on them afterwards.
+        var randomSystem = _entManager.System<RandomSystem>();
+        var allLoot = _prototypeManager.Index(SharedSalvageSystem.ExpeditionsLootProto);
+        var lootBudget = difficultyProto.LootBudget;
+
+        foreach (var rule in allLoot.LootRules)
+        {
+            switch (rule)
+            {
+                case RandomSpawnsLoot randomLoot:
+                    budgetEntries.Clear();
+
+                    foreach (var entry in randomLoot.Entries)
+                    {
+                        budgetEntries.Add(entry);
+                    }
+
+                    var lootProbSum = budgetEntries.Sum(x => x.Prob);
+
+                    while (lootBudget > 0f)
+                    {
+                        var entry = randomSystem.GetBudgetEntry(ref lootBudget, ref lootProbSum, budgetEntries, random);
+                        if (entry == null)
+                            break;
+
+                        _sawmill.Debug($"Spawning dungeon loot {entry.Proto}");
+                        await SpawnRandomEntry((mapUid, grid), entry, dungeon, random);
+                    }
+                    break;
+                default:
+                    throw new NotImplementedException();
+            }
+        }
+
+
         /*
          * MOB SPAWNS
          */
 
         var mobBudget = difficultyProto.MobBudget;
         var faction = _prototypeManager.Index<SalvageFactionPrototype>(mission.Faction);
-        var randomSystem = _entManager.System<RandomSystem>();
 
+        budgetEntries.Clear();
         foreach (var entry in faction.MobGroups)
         {
             budgetEntries.Add(entry);
@@ -247,38 +282,6 @@ public sealed class SpawnSalvageMissionJob : Job<bool>
             catch (Exception e)
             {
                 _sawmill.Error($"Failed to spawn mobs for {entry.Proto}: {e}");
-            }
-        }
-
-        var allLoot = _prototypeManager.Index(SharedSalvageSystem.ExpeditionsLootProto);
-        var lootBudget = difficultyProto.LootBudget;
-
-        foreach (var rule in allLoot.LootRules)
-        {
-            switch (rule)
-            {
-                case RandomSpawnsLoot randomLoot:
-                    budgetEntries.Clear();
-
-                    foreach (var entry in randomLoot.Entries)
-                    {
-                        budgetEntries.Add(entry);
-                    }
-
-                    probSum = budgetEntries.Sum(x => x.Prob);
-
-                    while (lootBudget > 0f)
-                    {
-                        var entry = randomSystem.GetBudgetEntry(ref lootBudget, ref probSum, budgetEntries, random);
-                        if (entry == null)
-                            break;
-
-                        _sawmill.Debug($"Spawning dungeon loot {entry.Proto}");
-                        await SpawnRandomEntry((mapUid, grid), entry, dungeon, random);
-                    }
-                    break;
-                default:
-                    throw new NotImplementedException();
             }
         }
 
@@ -309,6 +312,11 @@ public sealed class SpawnSalvageMissionJob : Job<bool>
                     continue;
                 }
 
+                // TileFree only looks at anchored things; don't spawn a mob inside something solid that isn't anchored
+                // either (e.g. a portable generator), where it gets stuck for good.
+                if (BlockedByLooseObject(grid, tile))
+                    continue;
+
                 var uid = _entManager.SpawnAtPosition(entry.Proto, _map.GridTileToLocal(grid, grid, tile));
                 _entManager.RemoveComponent<GhostRoleComponent>(uid);
                 _entManager.RemoveComponent<GhostTakeoverAvailableComponent>(uid);
@@ -317,6 +325,22 @@ public sealed class SpawnSalvageMissionJob : Job<bool>
         }
 
         // oh noooooooooooo
+    }
+
+    private bool BlockedByLooseObject(Entity<MapGridComponent> grid, Vector2i tile)
+    {
+        var lookup = _entManager.System<EntityLookupSystem>();
+        foreach (var ent in lookup.GetLocalEntitiesIntersecting(grid.Owner, tile, -0.1f, LookupFlags.Dynamic | LookupFlags.Static, grid.Comp))
+        {
+            if (_entManager.TryGetComponent<Robust.Shared.Physics.Components.PhysicsComponent>(ent, out var body) &&
+                body is { CanCollide: true, Hard: true } &&
+                (body.CollisionLayer & (int) CollisionGroup.MobMask) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private async Task SpawnDungeonLoot(SalvageLootPrototype loot, EntityUid gridUid)

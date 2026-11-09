@@ -34,6 +34,10 @@ public sealed partial class ServerAntagSelectionSystem : AntagSelectionSystem
         if (args.TookRole)
             return;
 
+        // Antagonists are turned off (e.g. a spawner left over from before the setting was changed).
+        if (NoAntagRoles)
+            return;
+
         if (ent.Comp.Rule is not { } rule || ent.Comp.Definition is not { } proto)
             return;
 

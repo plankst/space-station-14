@@ -195,6 +195,13 @@ public sealed partial class CCVars
     public static readonly CVarDef<bool> GamePersistGuests =
         CVarDef.Create("game.persistguests", true, CVar.ARCHIVE | CVar.SERVERONLY);
 
+    /// <summary>
+    ///     When enabled, nobody can become an antagonist: no round-start, late-join or mid-round antag picks, and no
+    ///     antag ghost roles, whatever players have in their preferences. Admins can still force one on purpose.
+    /// </summary>
+    public static readonly CVarDef<bool> GameNoAntagRoles =
+        CVarDef.Create("game.no_antagroles", false, CVar.SERVER | CVar.ARCHIVE);
+
     public static readonly CVarDef<bool> GameDiagonalMovement =
         CVarDef.Create("game.diagonalmovement", true, CVar.ARCHIVE);
 

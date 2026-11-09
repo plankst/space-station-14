@@ -1,1 +1,1 @@
-A Fork of Space Station 14 with Persistence in mind.
+A fork of Space Station 14 with persistence and more. A Space Sandbox meant for a group of friends.

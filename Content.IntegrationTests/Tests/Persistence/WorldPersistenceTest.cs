@@ -1568,6 +1568,534 @@ public sealed class WorldPersistenceTest : GameTest
     }
 
     /// <summary>
+    /// Mobs buckled to a chair or strapped to a bed are still buckled to it after a load: on the seat, lying down on the
+    /// bed, listed by the seat, and able to unbuckle normally.
+    /// </summary>
+    [Test]
+    [TestCase("Chair", false)]
+    [TestCase("Bed", false)]
+    [TestCase("Chair", true)]
+    [TestCase("Bed", true)]
+    public async Task BuckledMobsStayBuckledAfterLoad(string seatProto, bool playerBody)
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var buckle = entMan.System<Content.Shared.Buckle.SharedBuckleSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string mobName = "Persistent Test Sitter";
+        const string seatName = "Persistent Test Seat";
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                mapSys.SetTile(grid, gridComp, new Vector2i(0, 0), new Tile(1));
+                mapSys.SetTile(grid, gridComp, new Vector2i(1, 0), new Tile(1));
+                var seat = entMan.SpawnEntity(seatProto, new EntityCoordinates(grid, 0.5f, 0.5f));
+                entMan.System<SharedTransformSystem>().AnchorEntity(seat);
+                entMan.System<MetaDataSystem>().SetEntityName(seat, seatName);
+                var mob = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 1.5f, 0.5f));
+                entMan.System<MetaDataSystem>().SetEntityName(mob, mobName);
+                if (playerBody)
+                {
+                    var minds = entMan.System<SharedMindSystem>();
+                    var mind = minds.CreateMind(server.ResolveDependency<IPlayerManager>().Sessions.Single().UserId, mobName);
+                    minds.TransferTo(mind, mob);
+                }
+
+                Assert.That(buckle.TryBuckle(mob, null, seat, popup: false), "Test setup: the mob should buckle in");
+                break;
+            }
+        });
+        await pair.RunTicksSync(10);
+
+        (EntityUid Mob, EntityUid Seat) Find()
+        {
+            EntityUid mob = default, seat = default;
+            var q = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (q.MoveNext(out var uid, out var meta))
+            {
+                if (meta.EntityName == mobName && entMan.HasComponent<Content.Shared.Buckle.Components.BuckleComponent>(uid))
+                    mob = uid;
+                else if (meta.EntityName == seatName)
+                    seat = uid;
+            }
+
+            Assert.That(mob, Is.Not.EqualTo(default(EntityUid)), "The mob is missing");
+            Assert.That(seat, Is.Not.EqualTo(default(EntityUid)), "The seat is missing");
+            if (playerBody)
+                Assert.That(server.ResolveDependency<IPlayerManager>().Sessions.Single().AttachedEntity, Is.EqualTo(mob), "The player isn't in their body");
+            return (mob, seat);
+        }
+
+        var standingBefore = false;
+        await server.WaitPost(() =>
+        {
+            var (mob, seat) = Find();
+            Assert.That(entMan.GetComponent<Content.Shared.Buckle.Components.BuckleComponent>(mob).BuckledTo, Is.EqualTo(seat), "Test setup: not buckled");
+            standingBefore = !entMan.System<Content.Shared.Standing.StandingStateSystem>().IsDown(mob);
+        });
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var (mob, seat) = Find();
+            var buckleComp = entMan.GetComponent<Content.Shared.Buckle.Components.BuckleComponent>(mob);
+            var xformSys = entMan.System<SharedTransformSystem>();
+            Assert.Multiple(() =>
+            {
+                Assert.That(buckleComp.BuckledTo, Is.EqualTo(seat), "The mob isn't buckled any more after loading");
+                Assert.That(entMan.GetComponent<Content.Shared.Buckle.Components.StrapComponent>(seat).BuckledEntities, Does.Contain(mob),
+                    "The seat doesn't know who's buckled to it after loading");
+                Assert.That((xformSys.GetWorldPosition(mob) - xformSys.GetWorldPosition(seat)).Length(), Is.LessThan(0.3f),
+                    "The mob isn't on its seat after loading");
+                Assert.That(!entMan.System<Content.Shared.Standing.StandingStateSystem>().IsDown(mob), Is.EqualTo(standingBefore),
+                    "The mob's standing/lying changed after loading");
+            });
+
+            // And unbuckling still works.
+            buckle.Unbuckle((mob, buckleComp), null);
+            Assert.That(buckleComp.BuckledTo, Is.Null, "The mob can't unbuckle after loading");
+            Assert.That(entMan.GetComponent<Content.Shared.Buckle.Components.StrapComponent>(seat).BuckledEntities, Does.Not.Contain(mob));
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Mobs lying down (strapped to a bed, or lying on the floor by choice) still look like they're lying down after a
+    /// load. The server remembered they were down, but the "draw it lying down" appearance value isn't saved, so they
+    /// were drawn standing up.
+    /// </summary>
+    [Test]
+    public async Task LyingMobsStillLookLyingAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var appearance = entMan.System<SharedAppearanceSystem>();
+        var standing = entMan.System<Content.Shared.Standing.StandingStateSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        var names = new[] { "Persistent Test Sleeper", "Persistent Test Crawler" };
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                for (var x = 0; x <= 3; x++)
+                {
+                    mapSys.SetTile(grid, gridComp, new Vector2i(x, 0), new Tile(1));
+                }
+
+                var bed = entMan.SpawnEntity("Bed", new EntityCoordinates(grid, 0.5f, 0.5f));
+                entMan.System<SharedTransformSystem>().AnchorEntity(bed);
+                var sleeper = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 1.5f, 0.5f));
+                entMan.System<MetaDataSystem>().SetEntityName(sleeper, names[0]);
+                Assert.That(entMan.System<Content.Shared.Buckle.SharedBuckleSystem>().TryBuckle(sleeper, null, bed, popup: false));
+
+                // Lying on the floor.
+                var crawler = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 3.5f, 0.5f));
+                entMan.System<MetaDataSystem>().SetEntityName(crawler, names[1]);
+                Assert.That(standing.Down(crawler, playSound: false, dropHeldItems: false, force: true));
+                break;
+            }
+        });
+        await pair.RunTicksSync(30);
+
+        List<EntityUid> Find()
+        {
+            var found = new List<EntityUid>();
+            foreach (var name in names)
+            {
+                var q = entMan.AllEntityQueryEnumerator<MetaDataComponent, Content.Shared.Standing.StandingStateComponent>();
+                while (q.MoveNext(out var uid, out var meta, out _))
+                {
+                    if (meta.EntityName == name)
+                        found.Add(uid);
+                }
+            }
+
+            Assert.That(found, Has.Count.EqualTo(names.Length), "Some test mobs are missing");
+            return found;
+        }
+
+        string Describe(EntityUid uid)
+        {
+            appearance.TryGetData<Content.Shared.Rotation.RotationState>(uid, Content.Shared.Rotation.RotationVisuals.RotationState, out var state);
+            return $"{entMan.GetComponent<MetaDataComponent>(uid).EntityName}: down={standing.IsDown(uid)} drawn={state}";
+        }
+
+        await server.WaitPost(() =>
+        {
+            foreach (var uid in Find())
+            {
+                Assert.That(Describe(uid), Does.Contain("down=True drawn=Horizontal"), "Test setup");
+            }
+        });
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            Assert.Multiple(() =>
+            {
+                foreach (var uid in Find())
+                {
+                    Assert.That(Describe(uid), Does.Contain("down=True drawn=Horizontal"), "A lying mob looks wrong after loading");
+                }
+            });
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A stocked smart fridge saves (it used to throw while saving, which dropped the fridge and everything in it from
+    /// the save) and still lists and holds its contents after a load.
+    /// </summary>
+    [Test]
+    public async Task StockedSmartFridgeSurvivesLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var containers = entMan.System<Robust.Shared.Containers.SharedContainerSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string fridgeName = "Persistent Test Fridge";
+        var stock = new[] { "FoodApple", "FoodApple", "FoodBanana" };
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                mapSys.SetTile(grid, gridComp, new Vector2i(0, 0), new Tile(1));
+                var coords = new EntityCoordinates(grid, 0.5f, 0.5f);
+                var fridge = entMan.SpawnEntity("SmartFridge", coords);
+                entMan.System<MetaDataSystem>().SetEntityName(fridge, fridgeName);
+                var comp = entMan.GetComponent<Content.Shared.SmartFridge.SmartFridgeComponent>(fridge);
+                var container = containers.GetContainer(fridge, comp.Container);
+                foreach (var proto in stock)
+                {
+                    Assert.That(containers.Insert(entMan.SpawnEntity(proto, coords), container), "Test setup: couldn't stock the fridge");
+                }
+
+                break;
+            }
+        });
+        await pair.RunTicksSync(5);
+
+        (int Inside, int Listed, int Kinds) Count()
+        {
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.SmartFridge.SmartFridgeComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out var comp, out var meta))
+            {
+                if (meta.EntityName != fridgeName)
+                    continue;
+
+                return (containers.GetContainer(uid, comp.Container).ContainedEntities.Count,
+                    comp.ContainedEntries.Values.Sum(v => v.Count),
+                    comp.ContainedEntries.Count(kv => kv.Value.Count > 0));
+            }
+
+            Assert.Fail("The smart fridge is missing (it failed to save)");
+            return default;
+        }
+
+        await server.WaitPost(() => Assert.That(Count(), Is.EqualTo((3, 3, 2)), "Test setup"));
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            Assert.That(Count(), Is.EqualTo((3, 3, 2)), "The fridge lost or stopped listing its contents after loading");
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Salvage magnet salvage works like expeditions: whatever the magnet pulled in (and any stranded holding map) is
+    /// never saved, players standing on it are brought home before the save, and after loading the magnet is fresh
+    /// with new offers, as if it had never been used.
+    /// </summary>
+    [Test]
+    public async Task SalvageMagnetIsNotSaved()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var playerMan = server.ResolveDependency<IPlayerManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var salvage = entMan.System<Content.Server.Salvage.SalvageSystem>();
+        var stationSys = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+        var mapSys = entMan.System<SharedMapSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string salvagerName = "Persistent Test Salvager";
+        EntityUid station = default;
+        EntityUid stationGrid = default;
+        System.Threading.Tasks.Task? pull = null;
+
+        await server.WaitPost(() =>
+        {
+            station = stationSys.GetStations().First().Owner;
+            stationGrid = stationSys.GetLargestGrid(station)!.Value;
+            var data = entMan.EnsureComponent<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station);
+            salvage.ResetMagnet((station, data));
+
+            mapSys.SetTile(stationGrid, entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(stationGrid), Vector2i.Zero, new Tile(1));
+            var magnet = entMan.SpawnEntity("SalvageMagnet", new EntityCoordinates(stationGrid, 0.5f, 0.5f));
+            entMan.System<SharedTransformSystem>().AnchorEntity(magnet);
+
+            // Pull in the first offer, the same way the magnet console does.
+            var take = typeof(Content.Server.Salvage.SalvageSystem).GetMethod("TakeMagnetOffer",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            pull = (System.Threading.Tasks.Task) take.Invoke(salvage, new object[]
+            {
+                new Entity<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station, data), 0,
+                new Entity<Content.Server.Salvage.Magnet.SalvageMagnetComponent>(magnet,
+                    entMan.GetComponent<Content.Server.Salvage.Magnet.SalvageMagnetComponent>(magnet)),
+            })!;
+        });
+
+        List<EntityUid> pulled = new();
+        for (var i = 0; i < 600 && pulled.Count == 0; i++)
+        {
+            await pair.RunTicksSync(5);
+            await server.WaitPost(() =>
+            {
+                var data = entMan.GetComponent<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station);
+                pulled = salvage.GetActiveMagnetGrids(data).ToList();
+            });
+        }
+
+        Assert.That(pulled, Is.Not.Empty, $"Test setup: the magnet never pulled anything in (pull: {pull?.Status} {pull?.Exception})");
+
+        var player = playerMan.Sessions.Single();
+        await server.WaitPost(() =>
+        {
+            // A player standing on the pulled salvage when the server goes down.
+            var pulledGrid = entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(pulled[0]);
+            var tile = mapSys.GetAllTiles(pulled[0], pulledGrid).First();
+            var salvager = entMan.SpawnEntity("MobHuman", mapSys.GridTileToLocal(pulled[0], pulledGrid, tile.GridIndices));
+            Assert.That(entMan.GetComponent<TransformComponent>(salvager).GridUid, Is.EqualTo(pulled[0]), "Test setup: not standing on the salvage");
+            entMan.System<MetaDataSystem>().SetEntityName(salvager, salvagerName);
+            var minds = entMan.System<SharedMindSystem>();
+            var mind = minds.CreateMind(player.UserId, salvagerName);
+            minds.TransferTo(mind, salvager);
+
+            // Stranded players go to the captain's spawn point.
+            mapSys.SetTile(stationGrid, entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(stationGrid), new Vector2i(3, 0), new Tile(1));
+            entMan.SpawnEntity("SpawnPointCaptain", new EntityCoordinates(stationGrid, 3.5f, 0.5f));
+
+            // And a holding map stranded by an interrupted pull, like the one found in a real save.
+            var stray = mapSys.CreateMap(out var strayId);
+            entMan.EnsureComponent<Content.Server.Salvage.Magnet.SalvageMagnetHoldingMapComponent>(stray);
+            var strayGrid = mapSys.CreateGridEntity(strayId);
+            mapSys.SetTile(strayGrid, Vector2i.Zero, new Tile(1));
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            station = stationSys.GetStations().First().Owner;
+            // The station grid is the one with the captain's spawn point on it.
+            var spawns = entMan.AllEntityQueryEnumerator<Content.Shared.Spawners.Components.SpawnPointComponent, TransformComponent>();
+            while (spawns.MoveNext(out var spawn, out var spawnXform))
+            {
+                if (spawn.Job == "Captain" && spawnXform.GridUid is { } grid)
+                    stationGrid = grid;
+            }
+
+            var data = entMan.GetComponent<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station);
+            Assert.Multiple(() =>
+            {
+                Assert.That(entMan.Count<Content.Server.Salvage.Magnet.SalvageMagnetHoldingMapComponent>(), Is.Zero,
+                    "A magnet holding map was saved");
+                Assert.That(salvage.GetActiveMagnetGrids(data), Is.Empty, "The magnet still has salvage pulled in after loading");
+                Assert.That(data.EndTime, Is.Null, "The magnet is still busy after loading");
+                Assert.That(data.Offered, Has.Count.EqualTo(data.OfferCount), "The magnet has no offers after loading");
+                Assert.That(entMan.Count<Content.Server.Salvage.Magnet.SalvageMobRestrictionsComponent>(), Is.Zero,
+                    "Salvage mobs were saved");
+
+                // Only the station and the other saved grids are left; nothing called like magnet salvage.
+                var gridNames = new List<string>();
+                var grids = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, MetaDataComponent>();
+                while (grids.MoveNext(out _, out _, out var meta))
+                {
+                    gridNames.Add(meta.EntityName);
+                }
+
+                Assert.That(gridNames, Has.None.EqualTo(server.ResolveDependency<Robust.Shared.Localization.ILocalizationManager>().GetString("salvage-asteroid-name")), "Magnet salvage was saved");
+
+                var salvagers = entMan.AllEntityQueryEnumerator<Content.Shared.Inventory.InventoryComponent, MetaDataComponent, TransformComponent>();
+                var found = false;
+                while (salvagers.MoveNext(out _, out _, out var meta, out var xform))
+                {
+                    if (meta.EntityName != salvagerName)
+                        continue;
+
+                    found = true;
+                    Assert.That(xform.GridUid, Is.EqualTo(stationGrid), "The player on the salvage wasn't brought home");
+                    Assert.That((xform.LocalPosition - new System.Numerics.Vector2(3.5f, 0.5f)).Length(), Is.LessThan(0.5f),
+                        "The player wasn't brought to the captain's spawn point");
+                }
+
+                Assert.That(found, "The player standing on the salvage was lost");
+            });
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A crew shuttle docked to magnet salvage when the world is saved: the salvage isn't saved, so the dock link and
+    /// physics joint to it mustn't be either (an unsaved joint partner used to stop saves from loading at all).
+    /// After loading, the shuttle is there, undocked and able to fly.
+    /// </summary>
+    [Test]
+    public async Task ShuttleDockedToMagnetSalvageSurvivesLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var xformSys = entMan.System<SharedTransformSystem>();
+        var stationSys = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+        var docking = entMan.System<Content.Server.Shuttles.Systems.DockingSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string shuttleName = "Persistent Test Salvage Shuttle";
+
+        await server.WaitPost(() =>
+        {
+            var station = stationSys.GetStations().First().Owner;
+            var data = entMan.EnsureComponent<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station);
+
+            Entity<Robust.Shared.Map.Components.MapGridComponent> MakeGrid(float x, string name)
+            {
+                var grid = mapSys.CreateGridEntity(ticker.DefaultMap);
+                xformSys.SetWorldPosition(grid.Owner, new System.Numerics.Vector2(x, 300));
+                for (var i = 0; i < 3; i++)
+                {
+                    mapSys.SetTile(grid, new Vector2i(i, 0), new Tile(1));
+                }
+
+                entMan.System<MetaDataSystem>().SetEntityName(grid, name);
+                return grid;
+            }
+
+            // A crew shuttle with a dock on its east end, and a wreck the magnet pulled in with a dock on its west end.
+            var shuttle = MakeGrid(0, shuttleName);
+            entMan.EnsureComponent<Content.Shared.Shuttles.Components.ShuttleComponent>(shuttle);
+            var wreck = MakeGrid(4, "Persistent Test Wreck");
+            data.ActiveEntities = new List<EntityUid> { wreck.Owner };
+
+            var dockA = entMan.SpawnEntity("AirlockShuttle", new EntityCoordinates(shuttle, 2.5f, 0.5f));
+            xformSys.SetLocalRotation(dockA, Angle.FromDegrees(90));
+            xformSys.AnchorEntity(dockA);
+            var dockB = entMan.SpawnEntity("AirlockShuttle", new EntityCoordinates(wreck, 0.5f, 0.5f));
+            xformSys.SetLocalRotation(dockB, Angle.FromDegrees(-90));
+            xformSys.AnchorEntity(dockB);
+
+            docking.Dock((dockA, entMan.GetComponent<Content.Server.Shuttles.Components.DockingComponent>(dockA)),
+                (dockB, entMan.GetComponent<Content.Server.Shuttles.Components.DockingComponent>(dockB)));
+            Assert.That(entMan.GetComponent<Content.Server.Shuttles.Components.DockingComponent>(dockA).Docked, "Test setup: not docked");
+        });
+        await pair.RunTicksSync(10);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var q = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, MetaDataComponent>();
+            EntityUid shuttle = default;
+            var wreckSaved = false;
+            while (q.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName == shuttleName)
+                    shuttle = uid;
+                else if (meta.EntityName == "Persistent Test Wreck")
+                    wreckSaved = true;
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(shuttle, Is.Not.EqualTo(default(EntityUid)), "The crew shuttle was lost");
+                Assert.That(wreckSaved, Is.False, "The magnet salvage was saved");
+
+                var docks = entMan.AllEntityQueryEnumerator<Content.Server.Shuttles.Components.DockingComponent, TransformComponent>();
+                while (docks.MoveNext(out _, out var dock, out var xform))
+                {
+                    if (xform.GridUid == shuttle)
+                        Assert.That(dock.Docked, Is.False, "The shuttle is still docked to salvage that no longer exists");
+                }
+
+                Assert.That(entMan.System<Content.Server.Shuttles.Systems.ShuttleSystem>().CanFTL(shuttle, out var reason),
+                    $"The shuttle can't fly after loading: {reason}");
+            });
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
     /// Hunger and thirst keep working after a load: when a loaded mob gets hungry and thirsty, it gets the alerts,
     /// and its satiations keep scheduling their next updates (they used to stop, so mobs never got hungry again).
     /// </summary>

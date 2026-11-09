@@ -829,7 +829,8 @@ namespace Content.Shared.Cuffs
         /// <returns>A list of cuffs if it exists, or null if there are no cuffs.</returns>
         public IReadOnlyList<EntityUid> GetAllCuffs(Entity<CuffableComponent?> entity)
         {
-            if (!Resolve(entity, ref entity.Comp))
+            // Something that can't be cuffed simply has no cuffs (e.g. a zombified animal); not an error.
+            if (!Resolve(entity, ref entity.Comp, false))
                 return [];
 
             return entity.Comp.Container.ContainedEntities;

@@ -29,6 +29,7 @@ public abstract partial class SharedSmartFridgeSystem : EntitySystem
         base.Initialize();
 
         SubscribeLocalEvent<SmartFridgeComponent, InteractUsingEvent>(OnInteractUsing, after: [typeof(AnchorableSystem)]);
+        SubscribeLocalEvent<SmartFridgeComponent, ComponentStartup>(OnStartup);
         SubscribeLocalEvent<SmartFridgeComponent, EntInsertedIntoContainerMessage>(OnItemInserted);
         SubscribeLocalEvent<SmartFridgeComponent, EntRemovedFromContainerMessage>(OnItemRemoved);
         SubscribeLocalEvent<SmartFridgeComponent, AfterAutoHandleStateEvent>((ent, ref _) => UpdateUI(ent));
@@ -79,6 +80,44 @@ public abstract partial class SharedSmartFridgeSystem : EntitySystem
         args.Handled = DoInsert(ent, args.User, [args.Used], true);
     }
 
+    // Which items are in the fridge isn't saved, but the items themselves are (in its container), e.g. when loading a
+    // world save. Work the list out again from what's actually inside.
+    private void OnStartup(Entity<SmartFridgeComponent> ent, ref ComponentStartup args)
+    {
+        if (_timing.ApplyingState || !_container.TryGetContainer(ent, ent.Comp.Container, out var container))
+            return;
+
+        foreach (var item in container.ContainedEntities)
+        {
+            var key = new SmartFridgeEntry(Identity.Name(item, EntityManager));
+            if (!ent.Comp.Entries.Contains(key))
+                ent.Comp.Entries.Add(key);
+
+            AddContained(ent, key, GetNetEntity(item));
+        }
+    }
+
+    // The sets in ContainedEntries are shared with the last networked state (its auto-generated state only copies the
+    // dictionary, not the sets in it). Changing one in place during client prediction also changed the state the client
+    // rewinds to, so every re-prediction of a dispense took out another item: the count ran down to 0 before the
+    // server's real count arrived. Always swap in a new set instead.
+    private static void AddContained(Entity<SmartFridgeComponent> ent, SmartFridgeEntry key, NetEntity item)
+    {
+        var items = ent.Comp.ContainedEntries.TryGetValue(key, out var old) ? new HashSet<NetEntity>(old) : new HashSet<NetEntity>();
+        items.Add(item);
+        ent.Comp.ContainedEntries[key] = items;
+    }
+
+    private static void RemoveContained(Entity<SmartFridgeComponent> ent, SmartFridgeEntry key, NetEntity item)
+    {
+        if (!ent.Comp.ContainedEntries.TryGetValue(key, out var old) || !old.Contains(item))
+            return;
+
+        var items = new HashSet<NetEntity>(old);
+        items.Remove(item);
+        ent.Comp.ContainedEntries[key] = items;
+    }
+
     private void OnItemInserted(Entity<SmartFridgeComponent> ent, ref EntInsertedIntoContainerMessage args)
     {
         if (args.Container.ID != ent.Comp.Container || _timing.ApplyingState)
@@ -88,10 +127,7 @@ public abstract partial class SharedSmartFridgeSystem : EntitySystem
         if (!ent.Comp.Entries.Contains(key))
             ent.Comp.Entries.Add(key);
 
-        ent.Comp.ContainedEntries.TryAdd(key, new());
-        var entries = ent.Comp.ContainedEntries[key];
-        if (!entries.Contains(GetNetEntity(args.Entity)))
-            entries.Add(GetNetEntity(args.Entity));
+        AddContained(ent, key, GetNetEntity(args.Entity));
 
         Dirty(ent);
         UpdateUI(ent);
@@ -104,10 +140,7 @@ public abstract partial class SharedSmartFridgeSystem : EntitySystem
 
         var key = new SmartFridgeEntry(Identity.Name(args.Entity, EntityManager));
 
-        if (ent.Comp.ContainedEntries.TryGetValue(key, out var contained))
-        {
-            contained.Remove(GetNetEntity(args.Entity));
-        }
+        RemoveContained(ent, key, GetNetEntity(args.Entity));
 
         Dirty(ent);
         UpdateUI(ent);
@@ -141,7 +174,7 @@ public abstract partial class SharedSmartFridgeSystem : EntitySystem
                 continue;
 
             _audio.PlayPredicted(ent.Comp.SoundVend, ent, args.Actor);
-            contained.Remove(item);
+            RemoveContained(ent, args.Entry, item);
             Dirty(ent);
             UpdateUI(ent);
             return;

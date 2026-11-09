@@ -45,7 +45,10 @@ public sealed partial class SmartFridgeComponent : Component
     /// <summary>
     /// A mapping of smart fridge entries to the actual contained contents
     /// </summary>
-    [DataField, AutoNetworkedField]
+    // Not saved: entry keys can't be written as yaml keys (a world save of a stocked fridge failed and dropped the
+    // fridge and everything in it), and NetEntities mean nothing after a restart anyway. It's rebuilt from the
+    // container's contents when the fridge starts up (see SharedSmartFridgeSystem.OnStartup).
+    [AutoNetworkedField]
     [Access(typeof(SharedSmartFridgeSystem), Other = AccessPermissions.ReadExecute)]
     public Dictionary<SmartFridgeEntry, HashSet<NetEntity>> ContainedEntries = new();
 

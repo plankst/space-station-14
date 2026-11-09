@@ -42,6 +42,7 @@ namespace Content.Shared.Antag;
 public abstract partial class AntagSelectionSystem : GameRuleSystem<AntagSelectionComponent>
 {
     [Dependency] protected ISharedPlayerManager PlayerManager = default!;
+    [Dependency] private Robust.Shared.Configuration.IConfigurationManager _cfg = default!;
     [Dependency] protected ISharedAdminLogManager AdminLogger = default!;
     [Dependency] private ArrivalsSystem _arrivals = default!;
     [Dependency] protected EntityWhitelistSystem Whitelist = default!;
@@ -77,11 +78,18 @@ public abstract partial class AntagSelectionSystem : GameRuleSystem<AntagSelecti
     private List<(Entity<AntagSelectionComponent> gameRule, AntagSpecifierPrototype antag, ICommonSession player)> _delayedAntags = [];
 
     /// <inheritdoc/>
+    /// <summary>
+    /// <see cref="Content.Shared.CCVar.CCVars.GameNoAntagRoles"/>: nobody may become an antagonist.
+    /// </summary>
+    public bool NoAntagRoles { get; private set; }
+
     public override void Initialize()
     {
         base.Initialize();
 
         Log.Level = LogLevel.Debug;
+
+        Subs.CVar(_cfg, Content.Shared.CCVar.CCVars.GameNoAntagRoles, v => NoAntagRoles = v, true);
 
         // In order of how these occur.
         SubscribeLocalEvent<RulePlayerSpawningEvent>(OnPlayerSpawning);

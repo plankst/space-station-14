@@ -28,6 +28,18 @@ public sealed partial class StandingStateSystem : EntitySystem
         SubscribeLocalEvent<StandingStateComponent, RefreshFrictionModifiersEvent>(OnRefreshFrictionModifiers);
         SubscribeLocalEvent<StandingStateComponent, TileFrictionEvent>(OnTileFriction);
         SubscribeLocalEvent<StandingStateComponent, EndClimbEvent>(OnEndClimb);
+        SubscribeLocalEvent<StandingStateComponent, ComponentStartup>(OnStartup);
+    }
+
+    // How a mob is drawn (lying or upright) is appearance data, which isn't saved; it's normally only set when it lies
+    // down or stands up. A mob that starts out already lying down (e.g. loaded from a world save while asleep in a bed)
+    // would otherwise be drawn standing up.
+    private void OnStartup(Entity<StandingStateComponent> ent, ref ComponentStartup args)
+    {
+        if (ent.Comp.Standing)
+            return;
+
+        _appearance.SetData(ent, RotationVisuals.RotationState, RotationState.Horizontal);
     }
 
     private void OnMobTargetCollide(Entity<StandingStateComponent> ent, ref AttemptMobTargetCollideEvent args)

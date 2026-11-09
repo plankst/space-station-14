@@ -44,6 +44,7 @@ public sealed partial class GhostRoleSystem : EntitySystem
 {
     [Dependency] private IBanManager _ban = default!;
     [Dependency] private IConfigurationManager _cfg = default!;
+    [Dependency] private Robust.Shared.Prototypes.IPrototypeManager _prototype = default!;
     [Dependency] private EuiManager _euiManager = default!;
     [Dependency] private IPlayerManager _playerManager = default!;
     [Dependency] private IAdminLogManager _adminLogger = default!;
@@ -312,6 +313,31 @@ public sealed partial class GhostRoleSystem : EntitySystem
         }
     }
 
+    /// <summary>
+    /// Whether this ghost role would make its player an antagonist while antagonists are turned off
+    /// (<see cref="CCVars.GameNoAntagRoles"/>).
+    /// </summary>
+    public bool IsBlockedAntagRole(Entity<GhostRoleComponent> role)
+    {
+        if (!_cfg.GetCVar(CCVars.GameNoAntagRoles))
+            return false;
+
+        if (HasComp<Content.Shared.Antag.Components.GhostRoleAntagSpawnerComponent>(role))
+            return true;
+
+        foreach (var mindRole in role.Comp.MindRoles)
+        {
+            if (_prototype.TryIndex(mindRole, out var proto) &&
+                proto.TryGetComponent<Content.Shared.Roles.Components.MindRoleComponent>(out var comp, EntityManager.ComponentFactory) &&
+                (comp.Antag || comp.ExclusiveAntag))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public void RegisterGhostRole(Entity<GhostRoleComponent> role)
     {
         if (_ghostRoles.ContainsValue(role))
@@ -463,6 +489,9 @@ public sealed partial class GhostRoleSystem : EntitySystem
         if (!_ghostRoles.TryGetValue(identifier, out var roleEnt))
             return;
 
+        if (IsBlockedAntagRole(roleEnt))
+            return;
+
         TryPrototypes(roleEnt, out var antags, out var jobs);
 
         // Check role bans
@@ -570,6 +599,9 @@ public sealed partial class GhostRoleSystem : EntitySystem
         if (!_ghostRoles.TryGetValue(identifier, out var role))
             return false;
 
+        if (IsBlockedAntagRole(role))
+            return false;
+
         var ev = new TakeGhostRoleEvent(player);
         RaiseLocalEvent(role, ref ev);
 
@@ -636,6 +668,10 @@ public sealed partial class GhostRoleSystem : EntitySystem
         foreach (var (id, (uid, role)) in _ghostRoles)
         {
             if (MetaData(uid).EntityPaused)
+                continue;
+
+            // Antagonists are turned off: don't even list antag ghost roles.
+            if (IsBlockedAntagRole((uid, role)))
                 continue;
 
 

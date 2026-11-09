@@ -1,0 +1,53 @@
+# AI for expedition zombies (see ZombifyOnSpawnSystem).
+# The same as the usual hostile melee AI, except it never tries to pick up a weapon first: zombies drop everything they
+# grab, so in a room full of loot they would spend all their time going for items instead of the crew.
+
+- type: htnCompound
+  id: ExpeditionZombieCompound
+  branches:
+    - tasks:
+        - !type:HTNCompoundTask
+          task: ExpeditionZombieMeleeCombatCompound
+    - tasks:
+        - !type:HTNCompoundTask
+          task: IdleCompound
+
+- type: htnCompound
+  id: ExpeditionZombieMeleeCombatCompound
+  branches:
+    - tasks:
+        - !type:HTNPrimitiveTask
+          operator: !type:UtilityOperator
+            proto: NearbyMeleeTargets
+        - !type:HTNCompoundTask
+          task: ExpeditionZombieBeforeAttackCompound
+
+- type: htnCompound
+  id: ExpeditionZombieBeforeAttackCompound
+  branches:
+    - preconditions:
+        - !type:BuckledPrecondition
+          isBuckled: true
+      tasks:
+        - !type:HTNPrimitiveTask
+          operator: !type:UnbuckleOperator
+            shutdownState: TaskFinished
+
+    - preconditions:
+        - !type:PulledPrecondition
+          isPulled: true
+      tasks:
+        - !type:HTNPrimitiveTask
+          operator: !type:UnPullOperator
+            shutdownState: TaskFinished
+
+    - preconditions:
+        - !type:InContainerPrecondition
+          isInContainer: true
+      tasks:
+        - !type:HTNCompoundTask
+          task: EscapeCompound
+
+    - tasks:
+        - !type:HTNCompoundTask
+          task: MeleeAttackTargetCompound

@@ -229,6 +229,99 @@ public sealed class ExpeditionZombieTest : GameTest
     }
 
     /// <summary>
+    /// Expedition zombies go straight for someone they can see, even with weapons lying around. They used to try to
+    /// pick up a weapon first like armed NPCs do, but zombies drop everything they grab, so they never got around to
+    /// attacking and just wandered between items.
+    /// </summary>
+    [Test]
+    public async Task ZombiesAttackInsteadOfGrabbingWeapons()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.EntMan;
+        var map = await pair.CreateTestMap();
+        var mapSys = entMan.System<SharedMapSystem>();
+
+        EntityUid victim = default;
+        await server.WaitPost(() =>
+        {
+            for (var x = -4; x <= 10; x++)
+            {
+                for (var y = -4; y <= 4; y++)
+                {
+                    mapSys.SetTile(map.Grid.Owner, map.Grid.Comp, new Vector2i(x, y), new Tile(1));
+                }
+            }
+
+            entMan.SpawnEntity(ZombieProtos[0], new EntityCoordinates(map.Grid.Owner, 0.5f, 0.5f));
+            // Loot lying around the zombie, like in an expedition structure.
+            foreach (var (proto, x, y) in new[] { ("Crowbar", -1.5f, 0.5f), ("Wrench", 0.5f, -1.5f), ("ToolboxMechanicalFilled", 0.5f, 2.5f) })
+            {
+                entMan.SpawnEntity(proto, new EntityCoordinates(map.Grid.Owner, x, y));
+            }
+
+            victim = entMan.SpawnEntity("MobHuman", new EntityCoordinates(map.Grid.Owner, 6.5f, 0.5f));
+            entMan.EnsureComponent<ZombieImmuneComponent>(victim);
+            // The test map has no air; keep that from hurting the victim so only bites count.
+            entMan.RemoveComponent<Content.Server.Body.Components.RespiratorComponent>(victim);
+            entMan.RemoveComponent<Content.Server.Atmos.Components.BarotraumaComponent>(victim);
+        });
+
+        var bitten = false;
+        for (var i = 0; i < 15 && !bitten; i++)
+        {
+            await pair.RunTicksSync((int) server.Timing.TickRate);
+            await server.WaitPost(() =>
+            {
+                var damage = entMan.System<Content.Shared.Damage.Systems.DamageableSystem>().GetAllDamage(victim).DamageDict;
+                bitten = damage.GetValueOrDefault("Slash") > 0 || damage.GetValueOrDefault("Piercing") > 0;
+            });
+        }
+
+        Assert.That(bitten, "The zombie never attacked the person standing in front of it");
+    }
+
+    /// <summary>
+    /// Zombies kill all sorts of things on expeditions. Turning an animal that can't be cuffed into a zombie used to log
+    /// an error, and turning someone who's handcuffed would throw while taking the cuffs off.
+    /// </summary>
+    [Test]
+    public async Task ZombifyingAnimalsAndCuffedPeopleWorks()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.EntMan;
+        var map = await pair.CreateTestMap();
+
+        EntityUid prisoner = default;
+        var cuffable = entMan.System<Content.Shared.Cuffs.SharedCuffableSystem>();
+        await server.WaitAssertion(() =>
+        {
+            var zombies = entMan.System<ZombieSystem>();
+
+            var frog = entMan.SpawnAtPosition("MobFrog", map.GridCoords);
+            zombies.ZombifyEntity(frog);
+            Assert.That(entMan.HasComponent<ZombieComponent>(frog), "The frog didn't turn");
+
+            prisoner = entMan.SpawnAtPosition("MobHuman", map.GridCoords);
+            var cuffs = entMan.SpawnAtPosition("Handcuffs", map.GridCoords);
+            Assert.That(cuffable.TryAddNewCuffs(prisoner, prisoner, cuffs), "Test setup: couldn't cuff");
+            // Real cuffing (after the do-after) also marks the cuffs as in use.
+            typeof(Content.Shared.Cuffs.Components.HandcuffComponent).GetField("Used")!
+                .SetValue(entMan.GetComponent<Content.Shared.Cuffs.Components.HandcuffComponent>(cuffs), true);
+            Assert.That(cuffable.GetAllCuffs(prisoner), Is.Not.Empty, "Test setup: not cuffed");
+            zombies.ZombifyEntity(prisoner);
+            Assert.That(entMan.HasComponent<ZombieComponent>(prisoner), "The cuffed person didn't turn");
+        });
+        await pair.RunTicksSync(10);
+
+        await server.WaitAssertion(() =>
+        {
+            Assert.That(cuffable.GetAllCuffs(prisoner), Is.Empty, "The zombie is still cuffed");
+        });
+    }
+
+    /// <summary>
     /// The Zombies expedition faction only spawns expedition zombies, with no boss, at about 11-12 zombies per
     /// expedition.
     /// </summary>

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Content.IntegrationTests.Fixtures;
@@ -68,6 +69,45 @@ public sealed class ExpeditionFtlTest : GameTest
 
         Assert.That(expedition, Is.Not.EqualTo(default(EntityUid)), "The expedition wasn't generated");
         await pair.RunTicksSync(tickRate * 10);
+
+        // No monster may start out stuck inside something solid (one zombie spawned inside a portable generator).
+        await server.WaitPost(() =>
+        {
+            var lookup = entMan.System<EntityLookupSystem>();
+            var stuck = new List<string>();
+            var mobs = entMan.AllEntityQueryEnumerator<Content.Shared.Mobs.Components.MobStateComponent, TransformComponent>();
+            while (mobs.MoveNext(out var mob, out _, out var xform))
+            {
+                if (xform.MapUid != expedition)
+                    continue;
+
+                foreach (var other in lookup.GetEntitiesInRange(mob, 0.2f, LookupFlags.Dynamic | LookupFlags.Static))
+                {
+                    if (other == mob || entMan.HasComponent<Content.Shared.Mobs.Components.MobStateComponent>(other) ||
+                        !entMan.TryGetComponent<Robust.Shared.Physics.Components.PhysicsComponent>(other, out var body) ||
+                        body is not { CanCollide: true, Hard: true } ||
+                        (body.CollisionLayer & (int) Content.Shared.Physics.CollisionGroup.MobMask) == 0)
+                    {
+                        continue;
+                    }
+
+                    stuck.Add($"{entMan.ToPrettyString(mob)} inside {entMan.ToPrettyString(other)}");
+                }
+            }
+
+            Assert.That(stuck, Is.Empty, "Monsters spawned stuck inside objects:\n" + string.Join("\n", stuck));
+        });
+
+        // Clear monsters off the landing area. The engine's debug-build physics checks trip when a shuttle drops out
+        // of FTL right onto a mob (release builds don't have them), which has nothing to do with what's tested here.
+        await server.WaitPost(() =>
+        {
+            var landing = new MapCoordinates(System.Numerics.Vector2.Zero, entMan.GetComponent<TransformComponent>(expedition).MapID);
+            foreach (var mob in entMan.System<EntityLookupSystem>().GetEntitiesInRange<Content.Shared.Mobs.Components.MobStateComponent>(landing, 20f))
+            {
+                entMan.DeleteEntity(mob);
+            }
+        });
 
         // A small shuttle with the player aboard, near the station.
         EntityUid shuttle = default;

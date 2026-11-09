@@ -11,6 +11,9 @@ namespace Content.Server.Zombies;
 /// </summary>
 public sealed partial class ZombifyOnSpawnSystem : EntitySystem
 {
+    private const string RootTask = "ExpeditionZombieCompound";
+    private const float AggroVisionRadius = 16f;
+
     [Dependency] private ZombieSystem _zombie = default!;
 
     private readonly List<Entity<ZombifyOnSpawnComponent>> _toZombify = new();
@@ -53,6 +56,10 @@ public sealed partial class ZombifyOnSpawnSystem : EntitySystem
         // things in the way, instead of giving up when a door or window is between them and their target.
         if (TryComp<HTNComponent>(ent, out var htn))
         {
+            // The usual hostile AI first goes for a weapon if its hands are empty, which zombies drop right away.
+            htn.RootTask = new HTNCompoundTask { Task = RootTask };
+            // Once they've seen someone, keep chasing a bit further than they can first spot them.
+            htn.Blackboard.SetValue("AggroVisionRadius", AggroVisionRadius);
             htn.Blackboard.SetValue(NPCBlackboard.NavPry, true);
             htn.Blackboard.SetValue(NPCBlackboard.NavSmash, true);
             htn.Blackboard.SetValue(NPCBlackboard.NavClimb, true);

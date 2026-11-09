@@ -86,6 +86,10 @@ public abstract partial class AntagSelectionSystem
         Entity<AntagSelectionComponent> gameRule,
         AntagSpecifierPrototype def)
     {
+        // The server has antagonists turned off entirely.
+        if (NoAntagRoles)
+            return false;
+
         // Cannot be antag if you're not in the game.
         if (IsDisconnected(player))
             return false;
@@ -376,6 +380,13 @@ public abstract partial class AntagSelectionSystem
     [PublicAPI]
     public void SpawnGhostRole(Entity<AntagSelectionComponent> gameRule, AntagSpecifierPrototype proto, bool assert = false)
     {
+        // Antagonists are turned off: don't offer antag ghost roles at all.
+        if (NoAntagRoles)
+        {
+            Log.Info($"Not spawning an antag ghost role for {proto.ID}: antagonists are turned off ({Content.Shared.CCVar.CCVars.GameNoAntagRoles.Name}).");
+            return;
+        }
+
         if (proto.SpawnerPrototype is not { } spawnerPrototype)
         {
             DebugTools.Assert(!assert, $"Tried to spawn a ghost role for {proto.ID}, but it had no prototype!");

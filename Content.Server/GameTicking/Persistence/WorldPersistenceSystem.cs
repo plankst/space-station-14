@@ -64,6 +64,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private IDependencyCollection _dependency = default!;
     [Dependency] private Content.Server.Shuttles.Systems.StationAnchorSystem _stationAnchor = default!;
     [Dependency] private PullingSystem _pulling = default!;
+    [Dependency] private Content.Server.Salvage.SalvageSystem _salvage = default!;
     [Dependency] private SharedAudioSystem _audio = default!;
 
     private bool _enabled;
@@ -80,6 +81,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// FTL sound references cleared for the duration of a save (see <see cref="OnBeforeSerialization"/>).
     /// </summary>
     private readonly List<(FTLComponent Ftl, EntityUid? Startup, EntityUid? Travel)> _hiddenFtlSounds = new();
+    private readonly List<(Content.Server.Salvage.Magnet.SalvageMagnetDataComponent Data, List<EntityUid> Grids)> _hiddenMagnetGrids = new();
 
     /// <summary>
     /// A save that is still being written to disk in the background.
@@ -277,8 +279,10 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// </summary>
     public void PrepareForFinalSave()
     {
-        // Expeditions aren't saved, so bring everyone on one back home first.
-        EntityManager.System<PersistentExpeditionFixSystem>().BringPlayersHomeFromExpeditions();
+        // Expeditions and magnet salvage aren't saved, so bring everyone on them back home first.
+        var expeditionFix = EntityManager.System<PersistentExpeditionFixSystem>();
+        expeditionFix.BringPlayersHomeFromExpeditions();
+        expeditionFix.BringPlayersHomeFromMagnetSalvage();
         DropPlayersHeldItems();
     }
 
@@ -390,6 +394,13 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
             _hiddenFtlSounds.Clear();
 
+            foreach (var (magnetData, grids) in _hiddenMagnetGrids)
+            {
+                magnetData.ActiveEntities = grids;
+            }
+
+            _hiddenMagnetGrids.Clear();
+
             foreach (var proto in unsavable)
             {
                 proto.MapSavable = false;
@@ -459,7 +470,8 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
                 foreach (var comp in components.OfType<MappingDataNode>())
                 {
                     // A map's transform has no parent, and that is written as "invalid" on purpose.
-                    if (comp.TryGet<ValueDataNode>("type", out var type) && type.Value == "Transform")
+                    comp.TryGet<ValueDataNode>("type", out var type);
+                    if (type?.Value == "Transform")
                         continue;
 
                     var dead = comp
@@ -471,6 +483,49 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
                     {
                         comp.Remove(key);
                         stripped++;
+                    }
+
+                    // Lists of entities (e.g. what something is linked to): drop the ones that aren't saved.
+                    foreach (var (_, value) in comp)
+                    {
+                        if (value is not SequenceDataNode list)
+                            continue;
+
+                        for (var i = list.Sequence.Count - 1; i >= 0; i--)
+                        {
+                            if (list.Sequence[i] is ValueDataNode { Value: "invalid" })
+                            {
+                                list.RemoveAt(i);
+                                stripped++;
+                            }
+                        }
+                    }
+
+                    switch (type?.Value)
+                    {
+                        // A physics joint (docking, welds, tethers...) to something that isn't saved can't be restored;
+                        // leave the whole joint out.
+                        case "Joint" when comp.TryGet<MappingDataNode>("joints", out var joints):
+                        {
+                            var deadJoints = joints
+                                .Where(kv => kv.Value is MappingDataNode joint &&
+                                             (!joint.TryGet<ValueDataNode>("bodyA", out var a) || a.Value == "invalid" ||
+                                              !joint.TryGet<ValueDataNode>("bodyB", out var b) || b.Value == "invalid"))
+                                .Select(kv => kv.Key)
+                                .ToList();
+
+                            foreach (var key in deadJoints)
+                            {
+                                joints.Remove(key);
+                                stripped++;
+                            }
+
+                            break;
+                        }
+                        // A dock whose partner isn't saved isn't docked any more; forget its joint too.
+                        case "Docking" when dead.Contains("dockedWith"):
+                            comp.Remove("dockJointId");
+                            break;
                     }
                 }
             }
@@ -787,7 +842,26 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         // - Salvage expeditions keep most of their state in runtime-only fields, so they don't survive a load
         //   (see PersistentExpeditionFixSystem).
         // - Expedition zombies only belong on their expedition, so one that followed the crew home isn't kept.
+        // - Salvage magnet salvage (its holding maps and whatever it has pulled in) is temporary like expeditions; the
+        //   magnet starts fresh after a load (see PersistentExpeditionFixSystem).
         var toRemove = new Queue<EntityUid>();
+        var magnetData = AllEntityQuery<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>();
+        while (magnetData.MoveNext(out var magnetDataComp))
+        {
+            foreach (var grid in _salvage.GetActiveMagnetGrids(magnetDataComp))
+            {
+                if (ev.Entities.Contains(grid))
+                    toRemove.Enqueue(grid);
+            }
+
+            // The list points at grids that aren't saved; keep it out of the save (restored right after).
+            if (magnetDataComp.ActiveEntities != null)
+            {
+                _hiddenMagnetGrids.Add((magnetDataComp, magnetDataComp.ActiveEntities));
+                magnetDataComp.ActiveEntities = null;
+            }
+        }
+
         foreach (var uid in ev.Entities)
         {
             if (HasComp<GameRuleComponent>(uid) ||
@@ -797,6 +871,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
                 HasComp<AudioEffectComponent>(uid) ||
                 HasComp<DungeonAtlasTemplateComponent>(uid) ||
                 HasComp<SalvageExpeditionComponent>(uid) ||
+                HasComp<Content.Server.Salvage.Magnet.SalvageMagnetHoldingMapComponent>(uid) ||
                 HasComp<Content.Server.Zombies.ExpeditionZombieComponent>(uid) ||
                 HasComp<Content.Server.Zombies.ZombifyOnSpawnComponent>(uid))
             {

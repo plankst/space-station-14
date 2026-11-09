@@ -89,7 +89,7 @@ public sealed partial class OfferingWindow : FancyWindow,
             else
             {
                 ProgressionBar.Value = 1f - (float) (remaining / ProgressionCooldown);
-                ProgressionText.Text = $"{remaining.Minutes:00}:{remaining.Seconds:00}";
+                ProgressionText.Text = FormatRemaining(remaining);
             }
         }
 
@@ -110,8 +110,18 @@ public sealed partial class OfferingWindow : FancyWindow,
             else
             {
                 NextOfferBar.Value = 1f - (float) (remaining / Cooldown);
-                NextOfferText.Text = $"{remaining.Minutes:00}:{remaining.Seconds:00}";
+                NextOfferText.Text = FormatRemaining(remaining);
             }
         }
+    }
+
+    /// <summary>
+    /// mm:ss, or h:mm:ss for an hour or more (expeditions can be configured to last hours; Minutes alone wraps at 60).
+    /// </summary>
+    public static string FormatRemaining(TimeSpan remaining)
+    {
+        return remaining.TotalHours >= 1
+            ? $"{(int) remaining.TotalHours}:{remaining.Minutes:00}:{remaining.Seconds:00}"
+            : $"{remaining.Minutes:00}:{remaining.Seconds:00}";
     }
 }

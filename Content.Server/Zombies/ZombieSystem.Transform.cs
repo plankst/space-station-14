@@ -336,7 +336,8 @@ public sealed partial class ZombieSystem
         }
 
         // Uncuffing the zombie
-        foreach (var cuff in _cuffable.GetAllCuffs(target))
+        // Copy the list: uncuffing removes from it.
+        foreach (var cuff in _cuffable.GetAllCuffs(target).ToList())
         {
             _cuffable.Uncuff(target, null, cuff);
         }
