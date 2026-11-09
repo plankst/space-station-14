@@ -39,6 +39,18 @@ namespace Content.Server.Atmos.EntitySystems
         }
 
         /// <summary>
+        /// The pressure protection from worn gear is cached and not saved, and is normally only worked out when gear is
+        /// put on. After loading a world save, someone already wearing a hardsuit would otherwise have no protection
+        /// until they took it off and put it back on.
+        /// </summary>
+        [SubscribeLocalEvent]
+        private void OnBarotraumaStartup(Entity<BarotraumaComponent> ent, ref ComponentStartup args)
+        {
+            UpdateCachedResistances(ent, ent.Comp);
+            RefreshPressureImmunity(ent, ent.Comp);
+        }
+
+        /// <summary>
         /// Generic method for updating resistance on component Lifestage events
         /// </summary>
         private void OnUpdateResistance(EntityUid uid, PressureProtectionComponent pressureProtection, EntityEventArgs args)

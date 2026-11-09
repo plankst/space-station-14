@@ -1,0 +1,208 @@
+# Infected crew that roam salvage expeditions (see the Zombies salvage faction).
+# They spawn as random humans in random crew clothing and turn into zombies a moment later.
+
+- type: entity
+  parent: MobHuman
+  id: MobZombieExpedition
+  name: infected crewmember
+  suffix: Expedition, Zombie
+  components:
+  - type: RandomHumanoidAppearance
+    randomizeName: true
+  - type: InputMover
+  - type: MobMover
+  - type: ZombifyOnSpawn
+    infectionChance: 0.5
+  - type: Loadout
+    prototypes:
+    - ZombieGearPassenger
+    - ZombieGearPassengerBlue
+    - ZombieGearEngineer
+    - ZombieGearDoctor
+    - ZombieGearSurgeon
+    - ZombieGearParamedic
+    - ZombieGearScientist
+    - ZombieGearChemist
+    - ZombieGearChef
+    - ZombieGearSecurity
+    - ZombieGearCargo
+    - ZombieGearSalvager
+    - ZombieGearJanitor
+    - ZombieGearBartender
+    - ZombieGearBotanist
+    - ZombieGearPrisoner
+    - ZombieGearClown
+    - ZombieGearMime
+    - ZombieGearDetective
+    - ZombieGearWinter
+    - ZombieGearAncient
+
+# Rarer: someone who died in their space suit.
+- type: entity
+  parent: MobZombieExpedition
+  id: MobZombieExpeditionSuited
+  name: infected spacer
+  components:
+  - type: Loadout
+    prototypes:
+    - ZombieGearEVA
+    - ZombieGearSalvageHardsuit
+
+# Gear sets. No gloves or headsets (zombification drops those on the floor), no IDs, bags or weapons.
+
+- type: startingGear
+  id: ZombieGearPassenger
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitColorGrey
+    shoes: ClothingShoesColorBlack
+
+- type: startingGear
+  id: ZombieGearPassengerBlue
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitColorBlue
+    shoes: ClothingShoesColorBrown
+
+- type: startingGear
+  id: ZombieGearEngineer
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitEngineering
+    shoes: ClothingShoesBootsWork
+    head: ClothingHeadHatHardhatYellow
+    outerClothing: ClothingOuterVestHazard
+
+- type: startingGear
+  id: ZombieGearDoctor
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitMedicalDoctor
+    shoes: ClothingShoesColorWhite
+    outerClothing: ClothingOuterCoatLab
+
+- type: startingGear
+  id: ZombieGearSurgeon
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitMedicalDoctor
+    shoes: ClothingShoesColorWhite
+    head: ClothingHeadHatSurgcapBlue
+    mask: ClothingMaskSterile
+
+- type: startingGear
+  id: ZombieGearParamedic
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitParamedic
+    shoes: ClothingShoesColorWhite
+
+- type: startingGear
+  id: ZombieGearScientist
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitScientist
+    shoes: ClothingShoesColorWhite
+    outerClothing: ClothingOuterCoatLab
+
+- type: startingGear
+  id: ZombieGearChemist
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitChemistry
+    shoes: ClothingShoesColorWhite
+    outerClothing: ClothingOuterCoatLabChem
+
+- type: startingGear
+  id: ZombieGearChef
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitChef
+    shoes: ClothingShoesColorBlack
+    head: ClothingHeadHatChef
+    outerClothing: ClothingOuterApronChef
+
+- type: startingGear
+  id: ZombieGearSecurity
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitSec
+    shoes: ClothingShoesBootsJack
+    head: ClothingHeadHelmetBasic
+
+- type: startingGear
+  id: ZombieGearCargo
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitCargo
+    shoes: ClothingShoesColorBlack
+
+- type: startingGear
+  id: ZombieGearSalvager
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitSalvageSpecialist
+    shoes: ClothingShoesBootsSalvage
+
+- type: startingGear
+  id: ZombieGearJanitor
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitJanitor
+    shoes: ClothingShoesColorBlack
+
+- type: startingGear
+  id: ZombieGearBartender
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitBartender
+    shoes: ClothingShoesColorBlack
+
+- type: startingGear
+  id: ZombieGearBotanist
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitHydroponics
+    shoes: ClothingShoesColorBrown
+    outerClothing: ClothingOuterApronBotanist
+
+- type: startingGear
+  id: ZombieGearPrisoner
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitPrisoner
+    shoes: ClothingShoesColorOrange
+
+- type: startingGear
+  id: ZombieGearClown
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitClown
+    shoes: ClothingShoesClown
+    mask: ClothingMaskClown
+
+- type: startingGear
+  id: ZombieGearMime
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitMime
+    shoes: ClothingShoesColorBlack
+    head: ClothingHeadHatBeret
+
+- type: startingGear
+  id: ZombieGearDetective
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitDetective
+    shoes: ClothingShoesColorBrown
+    head: ClothingHeadHatFedoraBrown
+    outerClothing: ClothingOuterCoatDetective
+
+- type: startingGear
+  id: ZombieGearWinter
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitColorBlack
+    shoes: ClothingShoesBootsWinter
+    outerClothing: ClothingOuterWinterCoat
+
+- type: startingGear
+  id: ZombieGearAncient
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitAncient
+    shoes: ClothingShoesColorBlack
+
+- type: startingGear
+  id: ZombieGearEVA
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitColorGrey
+    shoes: ClothingShoesColorBlack
+    head: ClothingHeadHelmetEVA
+    outerClothing: ClothingOuterHardsuitEVA
+
+- type: startingGear
+  id: ZombieGearSalvageHardsuit
+  equipment:
+    jumpsuit: ClothingUniformJumpsuitSalvageSpecialist
+    shoes: ClothingShoesBootsSalvage
+    outerClothing: ClothingOuterHardsuitSalvage

@@ -624,8 +624,11 @@ public sealed partial class NPCSteeringSystem
         var canInteract = (ent.Comp.Flags & PathFlags.Interact) != 0x0;
 
         // If not access locked we're fine if it can be bumped open or we can interact.
+        // A closed door that won't actually open (e.g. an unpowered or bolted airlock) can't be opened that way though;
+        // without this an NPC that could pry it keeps bumping/clicking it forever instead.
         if (!isAccessRequired
-            && (door.BumpOpen || canInteract))
+            && (door.BumpOpen || canInteract)
+            && (door.State != DoorState.Closed || _doors.CanOpen(doorUid, door, ent.Owner)))
             return true;
 
         // Last possibility is that we can pry it open.

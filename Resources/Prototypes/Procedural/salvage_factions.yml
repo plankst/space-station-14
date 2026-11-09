@@ -44,3 +44,15 @@
   configs:
     DefenseStructure: CarpStatue
     Megafauna: MobDragonDungeon
+
+# Infected crew from a station that fell to an outbreak. No boss on purpose.
+# Humans are much heavier on the server than carp, so they cost more: about 11-12 per expedition.
+- type: salvageFaction
+  id: Zombies
+  desc: salvage-faction-zombies
+  entries:
+    - proto: MobZombieExpedition
+      cost: 2
+    - proto: MobZombieExpeditionSuited
+      cost: 3
+      prob: 0.15

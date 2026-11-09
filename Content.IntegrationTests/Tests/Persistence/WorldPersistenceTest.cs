@@ -148,6 +148,8 @@ public sealed class WorldPersistenceTest : GameTest
             .Where(p => p.ID != "Audio" && !p.Components.ContainsKey("Audio"))
             // Nar'Sie / Ratvar eat the grid they're standing on, which has nothing to do with saving.
             .Where(p => !p.Components.ContainsKey("EventHorizon"))
+            // Expedition zombies are deliberately not saved (see ExpeditionZombiesAreNotSavedButInfectionIs).
+            .Where(p => !p.Components.ContainsKey("ZombifyOnSpawn"))
             .Where(p => p.Categories.All(c => c.ID is not ("Spawner" or "Debug" or "GameRules")))
             .Select(p => p.ID)
             .ToList();
@@ -1167,6 +1169,692 @@ public sealed class WorldPersistenceTest : GameTest
         });
 
         await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A switched-on station anchor still holds its grid in place after a load. The grid's pinned state isn't saved and
+    /// anchors used to only apply it on MapInit, so anchored stations started drifting again after a restart.
+    /// </summary>
+    [Test]
+    public async Task StationAnchorStillHoldsAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var xformSys = entMan.System<SharedTransformSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string anchorName = "Persistent Test Anchor";
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                entMan.EnsureComponent<Content.Shared.Shuttles.Components.ShuttleComponent>(grid);
+                entMan.System<Content.Server.Shuttles.Systems.ShuttleSystem>().Enable(grid);
+                mapSys.SetTile(grid, gridComp, new Vector2i(0, 0), new Tile(1));
+                var anchor = entMan.SpawnEntity("StationAnchorIndestructible", new EntityCoordinates(grid, 0.5f, 0.5f));
+                entMan.System<MetaDataSystem>().SetEntityName(anchor, anchorName);
+                xformSys.AnchorEntity(anchor);
+                break;
+            }
+        });
+        await pair.RunTicksSync(10);
+
+        (Robust.Shared.Physics.BodyType Body, bool ShuttleEnabled) GridState()
+        {
+            var q = entMan.AllEntityQueryEnumerator<Content.Server.Shuttles.Components.StationAnchorComponent, MetaDataComponent, TransformComponent>();
+            while (q.MoveNext(out _, out _, out var meta, out var xform))
+            {
+                if (meta.EntityName != anchorName || xform.GridUid is not { } grid)
+                    continue;
+
+                return (entMan.GetComponent<Robust.Shared.Physics.Components.PhysicsComponent>(grid).BodyType,
+                    entMan.GetComponent<Content.Shared.Shuttles.Components.ShuttleComponent>(grid).Enabled);
+            }
+
+            Assert.Fail("The test anchor is missing");
+            return default;
+        }
+
+        await server.WaitPost(() =>
+        {
+            var state = GridState();
+            Assert.That(state.Body, Is.EqualTo(Robust.Shared.Physics.BodyType.Static), "Test setup: the anchor should pin its grid");
+        });
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var state = GridState();
+            Assert.Multiple(() =>
+            {
+                Assert.That(state.Body, Is.EqualTo(Robust.Shared.Physics.BodyType.Static), "The anchored grid can move again after loading");
+                Assert.That(state.ShuttleEnabled, Is.False, "The anchored grid counts as a working shuttle again after loading");
+            });
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Expedition zombies stay on their expedition: one that ended up on the station (even dragged by someone or shut
+    /// in a locker) is left out of the save without breaking it. An infected crewmember stays infected.
+    /// </summary>
+    [Test]
+    public async Task ExpeditionZombiesAreNotSavedButInfectionIs()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string infectedName = "Persistent Test Infected";
+        const string lockerName = "Persistent Test Locker";
+        EntityUid draggedZombie = default;
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                for (var x = 0; x <= 2; x++)
+                {
+                    mapSys.SetTile(grid, gridComp, new Vector2i(x, 0), new Tile(1));
+                }
+
+                // Turns into a zombie on the next tick.
+                draggedZombie = entMan.SpawnEntity("MobZombieExpedition", new EntityCoordinates(grid, 1.5f, 0.5f));
+                var lockedZombie = entMan.SpawnEntity("MobZombieExpedition", new EntityCoordinates(grid, 2.5f, 0.5f));
+                var locker = entMan.SpawnEntity("ClosetSteelBase", new EntityCoordinates(grid, 2.5f, 0.5f));
+                entMan.System<MetaDataSystem>().SetEntityName(locker, lockerName);
+                entMan.System<Content.Shared.Storage.EntitySystems.SharedEntityStorageSystem>().Insert(lockedZombie, locker);
+
+                var infected = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 0.5f, 0.5f));
+                entMan.System<MetaDataSystem>().SetEntityName(infected, infectedName);
+                entMan.EnsureComponent<Content.Shared.Zombies.PendingZombieComponent>(infected);
+                entMan.EnsureComponent<Content.Shared.Zombies.ZombifyOnDeathComponent>(infected);
+                break;
+            }
+        });
+        await pair.RunTicksSync(5);
+
+        EntityUid? FindByName(string name)
+        {
+            var q = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (q.MoveNext(out var uid, out var meta))
+            {
+                if (meta.EntityName == name && meta.EntityPrototype != null)
+                    return uid;
+            }
+
+            return null;
+        }
+
+        int CountZombies()
+        {
+            var count = 0;
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Zombies.ZombieComponent>();
+            while (q.MoveNext(out _, out _))
+            {
+                count++;
+            }
+
+            return count;
+        }
+
+        await server.WaitPost(() =>
+        {
+            Assert.That(CountZombies(), Is.EqualTo(2), "Test setup: both expedition zombies should have turned");
+            var infected = FindByName(infectedName)!.Value;
+            Assert.That(entMan.System<Content.Shared.Movement.Pulling.Systems.PullingSystem>().TryStartPull(infected, draggedZombie),
+                "Test setup: the crewmember should be dragging a zombie");
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var infected = FindByName(infectedName);
+            var locker = FindByName(lockerName);
+            Assert.Multiple(() =>
+            {
+                Assert.That(CountZombies(), Is.Zero, "Expedition zombies were saved");
+                Assert.That(infected, Is.Not.Null, "The infected crewmember is missing after loading");
+                Assert.That(locker, Is.Not.Null, "The locker the zombie was in is missing after loading");
+                Assert.That(entMan.HasComponent<Content.Shared.Zombies.PendingZombieComponent>(infected), "The infected crewmember was cured by loading");
+                Assert.That(entMan.HasComponent<Content.Shared.Zombies.ZombifyOnDeathComponent>(infected), "The infected crewmember won't turn after loading");
+                Assert.That(entMan.GetComponent<Content.Shared.Movement.Pulling.Components.PullerComponent>(infected!.Value).Pulling, Is.Null,
+                    "The crewmember is still dragging a zombie that wasn't saved");
+                Assert.That(entMan.System<Robust.Shared.Containers.SharedContainerSystem>()
+                        .GetContainer(locker!.Value, "entity_storage").ContainedEntities, Is.Empty,
+                    "The locker still holds a zombie that wasn't saved");
+            });
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A switched-on item with a looping sound (a swinging Newton's cradle) loads without errors, even though its sound
+    /// isn't saved, and its sound starts again after loading. Any error logged while loading fails the test.
+    /// </summary>
+    [Test]
+    public async Task LoopingItemSoundsSurviveLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var toggle = entMan.System<Content.Shared.Item.ItemToggle.ItemToggleSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string cradleName = "Persistent Test Cradle";
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                mapSys.SetTile(grid, gridComp, new Vector2i(0, 0), new Tile(1));
+                var cradle = entMan.SpawnEntity("NewtonCradle", new EntityCoordinates(grid, 0.5f, 0.5f));
+                entMan.System<MetaDataSystem>().SetEntityName(cradle, cradleName);
+                Assert.That(toggle.TryActivate(cradle), "Test setup: the cradle should switch on");
+                break;
+            }
+        });
+        await pair.RunTicksSync(5);
+
+        Content.Shared.Item.ItemToggle.Components.ItemToggleActiveSoundComponent GetSound()
+        {
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Item.ItemToggle.Components.ItemToggleActiveSoundComponent, MetaDataComponent>();
+            while (q.MoveNext(out var sound, out var meta))
+            {
+                if (meta.EntityName == cradleName)
+                    return sound;
+            }
+
+            Assert.Fail("The test cradle is missing");
+            return default!;
+        }
+
+        await server.WaitPost(() =>
+        {
+            Assert.That(GetSound().PlayingStream, Is.Not.Null, "Test setup: the cradle should be making its sound");
+        });
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var sound = GetSound();
+            Assert.That(toggle.IsActivated(sound.Owner), "The cradle switched off after loading");
+            Assert.That(sound.PlayingStream, Is.Not.Null, "The cradle went silent after loading");
+            Assert.That(entMan.EntityExists(sound.PlayingStream), "The cradle's sound doesn't exist");
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Harvested produce keeps the chemicals its plant gave it (e.g. THC in cannabis) through a save and load, so
+    /// grinding it afterwards still gives them. Checks one harvest from every plant.
+    /// </summary>
+    [Test]
+    public async Task HarvestedProduceKeepsChemicalsAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var protoMan = server.ResolveDependency<IPrototypeManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var botany = entMan.System<Content.Shared.Botany.Systems.BotanySystem>();
+        var grinder = entMan.System<Content.Shared.Kitchen.EntitySystems.SharedReagentGrinderSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string prefix = "Persistent Test Produce ";
+        const string plantPrefix = "Persistent Test Plant ";
+        var plants = protoMan.EnumeratePrototypes<EntityPrototype>()
+            .Where(p => !p.Abstract && p.Components.ContainsKey("PlantData") && p.Components.ContainsKey("PlantChemicals"))
+            .Select(p => p.ID)
+            .ToList();
+        Assert.That(plants, Is.Not.Empty);
+
+        Dictionary<string, string> Grind()
+        {
+            var result = new Dictionary<string, string>();
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Botany.Items.Components.ProduceComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out var produce, out var meta))
+            {
+                // Some produce (killer tomatoes) gets renamed, so key by plant rather than by name.
+                if (!meta.EntityName.StartsWith(prefix) || produce.PlantProtoId is not { } plantId)
+                    continue;
+
+                var solution = grinder.GetGrinderSolution(uid, Content.Shared.Kitchen.GrinderProgram.Grind);
+                result[plantId.Id] = solution == null
+                    ? "nothing"
+                    : string.Join(" ", solution.Contents.OrderBy(r => r.Reagent.Prototype).Select(r => $"{r.Reagent.Prototype}={r.Quantity}"));
+            }
+
+            return result;
+        }
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                for (var i = 0; i < plants.Count; i++)
+                {
+                    mapSys.SetTile(grid, gridComp, new Vector2i(i, 60), new Tile(1));
+                    var coords = new EntityCoordinates(grid, i + 0.5f, 60.5f);
+                    var plant = entMan.SpawnEntity(plants[i], coords);
+                    botany.SpawnProduce(plant, coords, 1);
+                    entMan.System<MetaDataSystem>().SetEntityName(plant, plantPrefix + plants[i]);
+                }
+
+                break;
+            }
+
+            // Name each harvest after its plant so it can be found again after loading.
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Botany.Items.Components.ProduceComponent>();
+            while (q.MoveNext(out var uid, out var produce))
+            {
+                if (produce.PlantProtoId is { } plantId && plants.Contains(plantId.Id))
+                    entMan.System<MetaDataSystem>().SetEntityName(uid, prefix + plantId.Id);
+            }
+        });
+        await pair.RunTicksSync(5);
+
+        Dictionary<string, string> before = default!;
+        await server.WaitPost(() => before = Grind());
+        Assert.That(before, Has.Count.EqualTo(plants.Count), "Test setup: every plant should have been harvested");
+        Assert.That(before["CannabisPlants"], Does.Contain("THC"), "Test setup: cannabis should grind into THC");
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        Dictionary<string, string> after = default!;
+        await server.WaitPost(() => after = Grind());
+
+        // Plants that were growing when the world was saved should still give the same harvest afterwards.
+        Dictionary<string, string> fromLoadedPlants = default!;
+        await server.WaitPost(() =>
+        {
+            var old = entMan.AllEntityQueryEnumerator<Content.Shared.Botany.Items.Components.ProduceComponent, MetaDataComponent>();
+            while (old.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName.StartsWith(prefix))
+                    entMan.DeleteEntity(uid);
+            }
+
+            var found = 0;
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Botany.Components.PlantDataComponent, MetaDataComponent, TransformComponent>();
+            while (q.MoveNext(out var uid, out _, out var meta, out var xform))
+            {
+                if (!meta.EntityName.StartsWith(plantPrefix))
+                    continue;
+
+                found++;
+                botany.SpawnProduce(uid, xform.Coordinates, 1);
+            }
+
+            Assert.That(found, Is.EqualTo(plants.Count), "Some plants weren't saved");
+            var produce = entMan.AllEntityQueryEnumerator<Content.Shared.Botany.Items.Components.ProduceComponent>();
+            while (produce.MoveNext(out var uid, out var comp))
+            {
+                if (comp.PlantProtoId is { } plantId && plants.Contains(plantId.Id))
+                    entMan.System<MetaDataSystem>().SetEntityName(uid, prefix + plantId.Id);
+            }
+
+            fromLoadedPlants = Grind();
+        });
+        var changedHarvest = before.Keys
+            .Where(k => !fromLoadedPlants.TryGetValue(k, out var a) || a != before[k])
+            .Select(k => $"{k}: {before[k]} -> {fromLoadedPlants.GetValueOrDefault(k, "missing")}")
+            .ToList();
+        Assert.That(changedHarvest, Is.Empty, "Plants saved while growing give different chemicals when harvested after loading:\n" + string.Join("\n", changedHarvest));
+        var changed = before.Keys
+            .Where(k => !after.TryGetValue(k, out var a) || a != before[k])
+            .Select(k => $"{k}: {before[k]} -> {after.GetValueOrDefault(k, "missing")}")
+            .ToList();
+        Assert.That(changed, Is.Empty, "Ground produce gives different chemicals after loading:\n" + string.Join("\n", changed));
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Hunger and thirst keep working after a load: when a loaded mob gets hungry and thirsty, it gets the alerts,
+    /// and its satiations keep scheduling their next updates (they used to stop, so mobs never got hungry again).
+    /// </summary>
+    [Test]
+    public async Task HungerAndThirstWorkAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var protoMan = server.ResolveDependency<IPrototypeManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var satiationSys = entMan.System<Content.Shared.Nutrition.EntitySystems.SatiationSystem>();
+        var alerts = entMan.System<Content.Shared.Alert.AlertsSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string name = "Persistent Test Eater";
+        await server.WaitPost(() =>
+        {
+            var body = entMan.SpawnEntity("MobHuman", new MapCoordinates(0, 0, ticker.DefaultMap));
+            entMan.System<MetaDataSystem>().SetEntityName(body, name);
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        EntityUid body = default;
+        await server.WaitPost(() =>
+        {
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Nutrition.Components.SatiationComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName == name)
+                    body = uid;
+            }
+
+            Assert.That(body.IsValid(), "The test mob wasn't saved");
+
+            // Get very hungry and thirsty, the way time would.
+            var satiation = (body, entMan.GetComponent<Content.Shared.Nutrition.Components.SatiationComponent>(body));
+            satiationSys.ModifyValue(satiation, Content.Shared.Nutrition.EntitySystems.SatiationSystem.Hunger, -1000);
+            satiationSys.ModifyValue(satiation, Content.Shared.Nutrition.EntitySystems.SatiationSystem.Thirst, -1000);
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() =>
+        {
+            var comp = entMan.GetComponent<Content.Shared.Nutrition.Components.SatiationComponent>(body);
+            foreach (var (type, satiation) in comp.Satiations)
+            {
+                Assert.That(satiation.SatiationType, Is.EqualTo(type), $"{type} lost its type after loading");
+                var proto = protoMan.Index(satiation.Prototype);
+                Assert.That(alerts.IsShowingAlertCategory(body, proto.AlertCategory), $"No {type} alert after getting {type} following a load");
+            }
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A mob's internals keep working after the world is loaded by a brand-new server (a real reboot): bleeding,
+    /// body temperature, breathing, stamina, timed status effects, hardsuit pressure protection and gravity.
+    /// Also checks the game clock carries on from the save instead of restarting at zero.
+    /// </summary>
+    [Test]
+    public async Task MobInternalsWorkAfterReboot()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var res = server.ResolveDependency<IResourceManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, false);
+
+        const string name = "Persistent Test Patient";
+        const string starvingName = "Persistent Test Starving";
+        // Walk/sprint speed multipliers before saving, which must come back exactly: the hardsuit's slowdown on the
+        // patient, and the Starving + Parched slowdowns (the ones hunger and thirst give) on the starving mob.
+        var speedsAtSave = new Dictionary<string, (float Walk, float Sprint)>();
+        const string slowdown = "StatusEffectStutter";
+        EntityUid patient = default;
+        float highPressureMultiplier = 0, lowPressureMultiplier = 0, bleedAtSave = 0;
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                for (var x = -2; x <= 2; x++)
+                {
+                    for (var y = -2; y <= 2; y++)
+                    {
+                        mapSys.SetTile(grid, gridComp, new Vector2i(x, y), new Tile(1));
+                    }
+                }
+
+                // Built-in gravity, like a planet: a grid's gravity is otherwise re-worked out from its gravity
+                // generators when loaded, and the test grid has none.
+                var gravity = entMan.EnsureComponent<Content.Shared.Gravity.GravityComponent>(grid);
+                gravity.Inherent = true;
+                gravity.Enabled = true;
+                entMan.Dirty(grid, gravity);
+
+                patient = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 0.5f, 0.5f));
+                break;
+            }
+
+            entMan.System<MetaDataSystem>().SetEntityName(patient, name);
+
+            var starving = entMan.SpawnEntity("MobHuman", entMan.GetComponent<TransformComponent>(patient).Coordinates);
+            entMan.System<MetaDataSystem>().SetEntityName(starving, starvingName);
+            var starvingSatiation = (starving, entMan.GetComponent<Content.Shared.Nutrition.Components.SatiationComponent>(starving));
+            var satiationSys = entMan.System<Content.Shared.Nutrition.EntitySystems.SatiationSystem>();
+            satiationSys.ModifyValue(starvingSatiation, Content.Shared.Nutrition.EntitySystems.SatiationSystem.Hunger, -1000);
+            satiationSys.ModifyValue(starvingSatiation, Content.Shared.Nutrition.EntitySystems.SatiationSystem.Thirst, -1000);
+            var inventory = entMan.System<Content.Shared.Inventory.InventorySystem>();
+            var coords = entMan.GetComponent<TransformComponent>(patient).Coordinates;
+            Assert.That(inventory.TryEquip(patient, entMan.SpawnEntity("ClothingOuterHardsuitEVA", coords), "outerClothing", silent: true, force: true));
+            Assert.That(inventory.TryEquip(patient, entMan.SpawnEntity("ClothingHeadHelmetEVA", coords), "head", silent: true, force: true));
+
+            // A bad wound, so it's still bleeding when the world is saved.
+            entMan.System<Content.Shared.Body.Systems.BloodstreamSystem>().TryModifyBleedAmount(patient, 100f);
+            entMan.System<Content.Shared.Damage.Systems.SharedStaminaSystem>().TakeStaminaDamage(patient, 50f);
+            entMan.System<Content.Shared.StatusEffectNew.StatusEffectsSystem>().TryAddStatusEffectDuration(patient, slowdown, TimeSpan.FromSeconds(40));
+            var temperature = entMan.GetComponent<Content.Shared.Temperature.Components.TemperatureComponent>(patient);
+            entMan.System<Content.Shared.Temperature.Systems.SharedTemperatureSystem>()
+                .ChangeHeat((patient, temperature), temperature.HeatCapacity * 15f, ignoreHeatResistance: true);
+        });
+
+        // Play for a while, so the game clock is well past where a new server starts.
+        await pair.RunTicksSync(300);
+
+        string save = default!;
+        TimeSpan savedAt = default;
+        await server.WaitPost(() =>
+        {
+            var barotrauma = entMan.GetComponent<Content.Server.Atmos.Components.BarotraumaComponent>(patient);
+            highPressureMultiplier = barotrauma.HighPressureMultiplier;
+            lowPressureMultiplier = barotrauma.LowPressureMultiplier;
+            Assert.That(highPressureMultiplier, Is.LessThan(1f), "Test setup: the hardsuit should give pressure protection");
+            Assert.That(entMan.System<Content.Shared.StatusEffectNew.StatusEffectsSystem>().HasStatusEffect(patient, slowdown),
+                "Test setup: the slowdown should still be active when saving");
+
+            var nameQuery = entMan.AllEntityQueryEnumerator<Content.Shared.Movement.Components.MovementSpeedModifierComponent, MetaDataComponent>();
+            while (nameQuery.MoveNext(out _, out var speed, out var meta))
+            {
+                if (meta.EntityName == name || meta.EntityName == starvingName)
+                    speedsAtSave[meta.EntityName] = (speed.WalkSpeedModifier, speed.SprintSpeedModifier);
+            }
+
+            Assert.That(speedsAtSave[name].Walk, Is.LessThan(1f), "Test setup: the hardsuit should slow the patient down");
+            Assert.That(speedsAtSave[starvingName].Walk, Is.EqualTo(0.75f * 0.75f).Within(0.001f),
+                "Test setup: starving + parched should slow the mob down");
+            bleedAtSave = entMan.GetComponent<Content.Shared.Body.Components.BloodstreamComponent>(patient).BleedAmount;
+            Assert.That(bleedAtSave, Is.GreaterThan(0f), "Test setup: the patient should still be bleeding when saving");
+            savedAt = server.Timing.CurTime;
+            Assert.That(persistence.SaveWorld("test reboot", force: true));
+            using var reader = res.UserData.OpenText(new ResPath(SavePath));
+            save = reader.ReadToEnd();
+        });
+        await Cleanup(pair);
+
+        // "Reboot": a brand-new server.
+        var pair2 = await PoolManager.GetServerClient(new PoolSettings { DummyTicker = false, Connected = false, Fresh = true });
+        var server2 = pair2.Server;
+        var entMan2 = server2.ResolveDependency<IEntityManager>();
+        var ticker2 = entMan2.System<ServerGameTicker>();
+        var persistence2 = entMan2.System<WorldPersistenceSystem>();
+        server2.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server2.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server2.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server2.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, false);
+
+        await server2.WaitPost(() =>
+        {
+            var res2 = server2.ResolveDependency<IResourceManager>();
+            res2.UserData.CreateDir(new ResPath(SavePath).Directory);
+            using (var writer = res2.UserData.OpenWriteText(new ResPath(SavePath)))
+            {
+                writer.Write(save);
+            }
+
+            Assert.That(server2.Timing.CurTime, Is.LessThan(savedAt), "Test setup: a new server's clock should start behind the save");
+            // What normally happens during server startup.
+            Assert.That(persistence2.ContinueSavedGameClock(), "The game clock didn't carry on from the save");
+            Assert.That(server2.Timing.CurTime, Is.GreaterThanOrEqualTo(savedAt));
+            ticker2.RestartRound();
+        });
+        await pair2.RunTicksSync(10);
+        Assert.That(ticker2.WorldRestoredFromSave);
+
+        EntityUid patient2 = default;
+        float blood = 0, temp = 0, stamina = 0, asphyxiation = 0;
+        await server2.WaitPost(() =>
+        {
+            var q = entMan2.AllEntityQueryEnumerator<Content.Shared.Inventory.InventoryComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName == name)
+                    patient2 = uid;
+            }
+
+            Assert.That(patient2.IsValid(), "The patient wasn't saved");
+
+            var barotrauma = entMan2.GetComponent<Content.Server.Atmos.Components.BarotraumaComponent>(patient2);
+            var statusEffects = entMan2.System<Content.Shared.StatusEffectNew.StatusEffectsSystem>();
+            Assert.Multiple(() =>
+            {
+                Assert.That(entMan2.GetComponent<Content.Shared.Body.Components.BloodstreamComponent>(patient2).BleedAmount, Is.EqualTo(bleedAtSave),
+                    "The wound changed while saving/loading");
+                Assert.That(barotrauma.HighPressureMultiplier, Is.EqualTo(highPressureMultiplier), "Hardsuit lost its high pressure protection");
+                Assert.That(barotrauma.LowPressureMultiplier, Is.EqualTo(lowPressureMultiplier), "Hardsuit lost its low pressure protection");
+                Assert.That(entMan2.GetComponent<Content.Shared.Gravity.GravityAffectedComponent>(patient2).Weightless, Is.False,
+                    "The patient should not be weightless on a grid with gravity");
+                Assert.That(statusEffects.TryGetTime(patient2, slowdown, out var time), "The slowdown wore off too early");
+                Assert.That(time.EndEffectTime, Is.Not.Null);
+                Assert.That(time.EndEffectTime!.Value - server2.Timing.CurTime, Is.InRange(TimeSpan.Zero, TimeSpan.FromSeconds(40)),
+                    "The slowdown's end time is wrong after loading");
+            });
+
+            blood = entMan2.System<Content.Shared.Body.Systems.BloodstreamSystem>().GetBloodLevel(patient2);
+            temp = entMan2.GetComponent<Content.Shared.Temperature.Components.TemperatureComponent>(patient2).Temperature;
+            stamina = entMan2.GetComponent<Content.Shared.Damage.Components.StaminaComponent>(patient2).StaminaDamage;
+            asphyxiation = entMan2.System<Content.Shared.Damage.Systems.DamageableSystem>().GetAllDamage(patient2).DamageDict
+                .GetValueOrDefault("Asphyxiation").Float();
+        });
+
+        // The exact same slowdowns, straight after loading and after a while (nothing refreshes them by hand here).
+        async Task CheckSpeeds(string when)
+        {
+            var speeds = new Dictionary<string, (float Walk, float Sprint)>();
+            await server2.WaitPost(() =>
+            {
+                var q = entMan2.AllEntityQueryEnumerator<Content.Shared.Movement.Components.MovementSpeedModifierComponent, MetaDataComponent>();
+                while (q.MoveNext(out _, out var speed, out var meta))
+                {
+                    if (meta.EntityName == name || meta.EntityName == starvingName)
+                        speeds[meta.EntityName] = (speed.WalkSpeedModifier, speed.SprintSpeedModifier);
+                }
+            });
+
+            foreach (var (mob, atSave) in speedsAtSave)
+            {
+                Assert.That(speeds, Does.ContainKey(mob));
+                Assert.That(speeds[mob].Walk, Is.EqualTo(atSave.Walk).Within(0.001f), $"{mob}'s walk speed slowdown changed {when}");
+                Assert.That(speeds[mob].Sprint, Is.EqualTo(atSave.Sprint).Within(0.001f), $"{mob}'s sprint speed slowdown changed {when}");
+            }
+        }
+
+        await CheckSpeeds("right after loading");
+
+        // Let the body run for a while.
+        await pair2.RunTicksSync(300);
+        await CheckSpeeds("a while after loading");
+
+        await server2.WaitPost(() =>
+        {
+            var damage = entMan2.System<Content.Shared.Damage.Systems.DamageableSystem>().GetAllDamage(patient2).DamageDict;
+            Assert.Multiple(() =>
+            {
+                Assert.That(entMan2.System<Content.Shared.Body.Systems.BloodstreamSystem>().GetBloodLevel(patient2), Is.LessThan(blood),
+                    "Bleeding stopped working after loading");
+                Assert.That(entMan2.GetComponent<Content.Shared.Temperature.Components.TemperatureComponent>(patient2).Temperature, Is.Not.EqualTo(temp),
+                    "Body temperature stopped changing after loading");
+                Assert.That(entMan2.GetComponent<Content.Shared.Damage.Components.StaminaComponent>(patient2).StaminaDamage, Is.LessThan(stamina),
+                    "Stamina stopped recovering after loading");
+                Assert.That(damage.GetValueOrDefault("Asphyxiation").Float(), Is.GreaterThan(asphyxiation),
+                    "Breathing stopped working after loading (no suffocation in a vacuum)");
+            });
+        });
+
+        await Cleanup(pair2);
+        await pair2.CleanReturnAsync();
     }
 
     private static async Task<bool> MovesWhenWalking(Pair.TestPair pair, Robust.Shared.Player.ICommonSession player)

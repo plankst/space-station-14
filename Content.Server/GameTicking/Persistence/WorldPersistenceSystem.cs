@@ -1,3 +1,6 @@
+using Content.Shared.Item.ItemToggle.Components;
+using Content.Shared.Movement.Pulling.Components;
+using Content.Shared.Movement.Pulling.Systems;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -8,12 +11,14 @@ using Content.Shared.CCVar;
 using Content.Shared.GameTicking;
 using Content.Shared.GameTicking.Components;
 using Content.Shared.DeviceNetwork.Components;
+using Content.Shared.Gravity;
 using Content.Shared.Hands.Components;
 using Content.Shared.Hands.EntitySystems;
 using Content.Shared.Inventory.VirtualItem;
 using Content.Shared.Mind;
 using Content.Shared.Shuttles.Components;
 using Robust.Shared.Audio.Components;
+using Robust.Shared.Audio.Systems;
 using Robust.Shared.Configuration;
 using Robust.Shared.ContentPack;
 using Robust.Shared.EntitySerialization;
@@ -25,6 +30,8 @@ using Robust.Shared.Map.Events;
 using Robust.Shared.Prototypes;
 using Robust.Shared.Serialization;
 using Robust.Shared.Serialization.Markdown.Mapping;
+using Robust.Shared.Serialization.Markdown.Sequence;
+using Robust.Shared.Serialization.Markdown.Value;
 using Robust.Shared.Timing;
 using Robust.Shared.Utility;
 using YamlDotNet.Core;
@@ -51,9 +58,13 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private SharedUserInterfaceSystem _ui = default!;
     [Dependency] private SharedHandsSystem _hands = default!;
+    [Dependency] private Content.Shared.Gravity.SharedGravitySystem _gravity = default!;
     [Dependency] private Content.Shared.DeviceNetwork.Systems.DeviceNetworkSystem _deviceNetwork = default!;
     [Dependency] private Robust.Server.Player.IPlayerManager _players = default!;
     [Dependency] private IDependencyCollection _dependency = default!;
+    [Dependency] private Content.Server.Shuttles.Systems.StationAnchorSystem _stationAnchor = default!;
+    [Dependency] private PullingSystem _pulling = default!;
+    [Dependency] private SharedAudioSystem _audio = default!;
 
     private bool _enabled;
     private ResPath _savePath;
@@ -113,6 +124,65 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             _autosaveInterval = TimeSpan.FromSeconds(Math.Max(0f, v));
             _nextAutosave = _timing.CurTime + _autosaveInterval;
         }, true);
+
+        // Runs during server startup, before any player can connect (they get the clock when they connect).
+        ContinueSavedGameClock();
+    }
+
+    /// <summary>
+    /// Key in the save file's <c>meta</c> section holding the game time (<see cref="IGameTiming.CurTime"/>, in ticks
+    /// of 100ns) when the world was saved.
+    /// </summary>
+    public const string GameTimeMetaKey = "persistenceGameTime";
+
+    /// <summary>
+    /// Makes the game clock carry on from the time the world was saved, instead of restarting at zero.
+    /// </summary>
+    /// <remarks>
+    /// Lots of components store absolute game times (cooldowns, next updates, effect end times) without converting
+    /// them for saving. After a reboot those would be hours in the future (e.g. a dispenser ignoring clicks until its
+    /// cooldown "ends"). Continuing the clock keeps every saved time valid, including in content added later.
+    /// Must run before the world is loaded and before any player connects.
+    /// </remarks>
+    /// <returns>True if the clock was moved forward.</returns>
+    public bool ContinueSavedGameClock()
+    {
+        if (!_enabled || !SaveExists() || TryReadSavedGameTime(_savePath) is not { } savedTime)
+            return false;
+
+        if (savedTime <= _timing.CurTime)
+            return false;
+
+        Log.Info($"Continuing the game clock from the world save: {_timing.CurTime} -> {savedTime}.");
+        _timing.TimeBase = (savedTime, _timing.CurTick);
+        _nextAutosave = _timing.CurTime + _autosaveInterval;
+        return true;
+    }
+
+    /// <summary>
+    /// Reads the saved game time from the top of a save file, without loading the whole file.
+    /// </summary>
+    private TimeSpan? TryReadSavedGameTime(ResPath path)
+    {
+        try
+        {
+            using var reader = _res.UserData.OpenText(path);
+            for (var i = 0; i < 30 && reader.ReadLine() is { } line; i++)
+            {
+                var trimmed = line.Trim();
+                if (!trimmed.StartsWith(GameTimeMetaKey + ":"))
+                    continue;
+
+                if (long.TryParse(trimmed[(GameTimeMetaKey.Length + 1)..].Trim(), out var ticks) && ticks > 0)
+                    return TimeSpan.FromTicks(ticks);
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"Couldn't read the saved game time from {path}: {e.Message}");
+        }
+
+        return null;
     }
 
     public override void Update(float frameTime)
@@ -357,9 +427,57 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         MappingDataNode Finish(EntitySerializer s)
         {
             var data = s.Write();
+            StripDeadReferences(data);
+            // Remember the game time, so the clock can carry on from it after a reboot (see ContinueSavedGameClock).
+            data.Get<MappingDataNode>("meta").Add(GameTimeMetaKey, _timing.CurTime.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
             RaiseLocalEvent(new AfterSerializationEvent(s.EntityData.Values.Select(e => e.Uid).ToHashSet(), data, FileCategory.Save));
             return data;
         }
+    }
+
+    /// <summary>
+    /// Links to entities that aren't saved (mostly sounds, which are deliberately left out) get written as "invalid",
+    /// and every one of them logs an error when the save is loaded. Drop those fields so they load as their default
+    /// (usually "nothing") instead. E.g. a switched-on Newton's cradle remembers its looping click sound.
+    /// </summary>
+    private void StripDeadReferences(MappingDataNode data)
+    {
+        if (!data.TryGet<SequenceDataNode>("entities", out var groups))
+            return;
+
+        var stripped = 0;
+        foreach (var group in groups.OfType<MappingDataNode>())
+        {
+            if (!group.TryGet<SequenceDataNode>("entities", out var entities))
+                continue;
+
+            foreach (var entity in entities.OfType<MappingDataNode>())
+            {
+                if (!entity.TryGet<SequenceDataNode>("components", out var components))
+                    continue;
+
+                foreach (var comp in components.OfType<MappingDataNode>())
+                {
+                    // A map's transform has no parent, and that is written as "invalid" on purpose.
+                    if (comp.TryGet<ValueDataNode>("type", out var type) && type.Value == "Transform")
+                        continue;
+
+                    var dead = comp
+                        .Where(kv => kv.Value is ValueDataNode { Value: "invalid" })
+                        .Select(kv => kv.Key)
+                        .ToList();
+
+                    foreach (var key in dead)
+                    {
+                        comp.Remove(key);
+                        stripped++;
+                    }
+                }
+            }
+        }
+
+        if (stripped > 0)
+            Log.Debug($"Left {stripped} link(s) to unsaved entities out of the save.");
     }
 
     /// <summary>
@@ -516,8 +634,11 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
         CloseSavedUis(result);
         ReconnectDeviceNetworks(result);
+        RefreshWeightlessness(result);
+        ReapplyStationAnchors(result);
+        RestartLoopingItemSounds(result);
 
-        Log.Info($"Loaded world from {_savePath} in {stopwatch.Elapsed.TotalSeconds:N2}s: " +
+        Log.Info($"Loaded world from {_savePath} in {stopwatch.Elapsed.TotalSeconds:N2}s (game time {_timing.CurTime}): " +
                  $"{result.Maps.Count} maps, {result.Grids.Count} grids, {result.Entities.Count} entities.");
         return true;
     }
@@ -532,6 +653,53 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         {
             if (TryComp<UserInterfaceComponent>(uid, out var ui) && ui.Actors.Count > 0)
                 _ui.CloseUis((uid, ui));
+        }
+    }
+
+    /// <summary>
+    /// Whether something is weightless isn't saved, defaults to "weightless", and is normally only worked out on MapInit
+    /// (which loaded entities never get) or when it changes grid. Work it out again once the whole world is loaded.
+    /// </summary>
+    private void RefreshWeightlessness(LoadResult result)
+    {
+        foreach (var uid in result.Entities)
+        {
+            if (TryComp<GravityAffectedComponent>(uid, out var gravityAffected))
+                _gravity.RefreshWeightless((uid, gravityAffected));
+        }
+    }
+
+    /// <summary>
+    /// Sounds aren't saved, so a switched-on item with a looping sound (e.g. a swinging Newton's cradle) would go
+    /// silent after a load. Start its loop again.
+    /// </summary>
+    private void RestartLoopingItemSounds(LoadResult result)
+    {
+        foreach (var uid in result.Entities)
+        {
+            if (!TryComp<ItemToggleActiveSoundComponent>(uid, out var sound) ||
+                sound.ActiveSound == null ||
+                sound.PlayingStream != null ||
+                !TryComp<ItemToggleComponent>(uid, out var toggle) ||
+                !toggle.Activated)
+            {
+                continue;
+            }
+
+            var stream = _audio.PlayPvs(sound.ActiveSound, uid, sound.ActiveSound.Params.WithLoop(true));
+            sound.PlayingStream = stream?.Entity;
+        }
+    }
+
+    /// <summary>
+    /// Switched-on station anchors only pin their grid on MapInit, and the pinned state itself isn't saved, so after a
+    /// load anchored stations would drift again.
+    /// </summary>
+    private void ReapplyStationAnchors(LoadResult result)
+    {
+        foreach (var uid in result.Entities)
+        {
+            _stationAnchor.ReapplyLoadedAnchor(uid);
         }
     }
 
@@ -618,6 +786,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         // - Dungeon atlas maps are a cache of map files; the dungeon system deletes and re-creates them every round.
         // - Salvage expeditions keep most of their state in runtime-only fields, so they don't survive a load
         //   (see PersistentExpeditionFixSystem).
+        // - Expedition zombies only belong on their expedition, so one that followed the crew home isn't kept.
         var toRemove = new Queue<EntityUid>();
         foreach (var uid in ev.Entities)
         {
@@ -627,7 +796,9 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
                 HasComp<AudioAuxiliaryComponent>(uid) ||
                 HasComp<AudioEffectComponent>(uid) ||
                 HasComp<DungeonAtlasTemplateComponent>(uid) ||
-                HasComp<SalvageExpeditionComponent>(uid))
+                HasComp<SalvageExpeditionComponent>(uid) ||
+                HasComp<Content.Server.Zombies.ExpeditionZombieComponent>(uid) ||
+                HasComp<Content.Server.Zombies.ZombifyOnSpawnComponent>(uid))
             {
                 toRemove.Enqueue(uid);
             }
@@ -637,6 +808,16 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         {
             if (!ev.Entities.Remove(uid))
                 continue;
+
+            // Something being dragged keeps a link (and a physics joint) to whoever drags it. If only one side is saved,
+            // the save can't be loaded, so let go first.
+            if (TryComp<PullableComponent>(uid, out var pullable) && pullable.Puller != null)
+                _pulling.TryStopPull(uid, pullable);
+            if (TryComp<PullerComponent>(uid, out var puller) && puller.Pulling is { } pulled &&
+                TryComp<PullableComponent>(pulled, out var pulledComp))
+            {
+                _pulling.TryStopPull(pulled, pulledComp);
+            }
 
             var children = Transform(uid).ChildEnumerator;
             while (children.MoveNext(out var child))

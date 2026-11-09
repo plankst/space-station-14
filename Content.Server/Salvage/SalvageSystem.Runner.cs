@@ -22,6 +22,7 @@ public sealed partial class SalvageSystem
      */
 
     [Dependency] private MobStateSystem _mobState = default!;
+    [Dependency] private Content.Server.NPC.Systems.NPCSystem _npc = default!;
 
     private void InitializeRunner()
     {
@@ -49,6 +50,10 @@ public sealed partial class SalvageSystem
 
             // Don't count unidentified humans (loot) or anyone you murdered so you can still maroon them once dead.
             if (_mobState.IsDead(uid, mobState))
+                continue;
+
+            // AI mobs nobody plays (expedition zombies, other NPC factions) are monsters, not crew left behind.
+            if (_npc.IsAiWithoutPlayer(uid))
                 continue;
 
             // Okay they're on salvage, so are they on the shuttle.

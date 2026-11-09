@@ -8,6 +8,7 @@ using Content.Shared.Mobs;
 using Content.Shared.Mobs.Systems;
 using Content.Shared.NPC;
 using Content.Shared.NPC.Systems;
+using Content.Shared.SSDIndicator;
 using Prometheus;
 using Robust.Server.GameObjects;
 using Robust.Shared.Configuration;
@@ -27,6 +28,7 @@ namespace Content.Server.NPC.Systems
         [Dependency] private IConfigurationManager _configurationManager = default!;
         [Dependency] private HTNSystem _htn = default!;
         [Dependency] private MobStateSystem _mobState = default!;
+        [Dependency] private Content.Shared.StatusEffectNew.StatusEffectsSystem _statusEffects = default!;
 
         /// <summary>
         /// Whether any NPCs are allowed to run at all.
@@ -66,6 +68,31 @@ namespace Content.Server.NPC.Systems
         public void OnNPCStartup(EntityUid uid, HTNComponent component, ComponentStartup args)
         {
             component.Blackboard.SetValue(NPCBlackboard.Owner, uid);
+            NotSsdWithoutPlayer(uid);
+        }
+
+        /// <summary>
+        /// Whether this is an AI-controlled mob that no player controls (or ever controlled, as far as its mind goes).
+        /// </summary>
+        public bool IsAiWithoutPlayer(EntityUid uid)
+        {
+            return HasComp<HTNComponent>(uid) &&
+                   !(TryComp<MindContainerComponent>(uid, out var mindContainer) && mindContainer.HasMind);
+        }
+
+        /// <summary>
+        /// Humanoid mobs count as a player who went SSD (nobody controlling them), and after a while that knocks them
+        /// down for good ("SSD sleep"). An AI mob without a player never had one to lose. If a player takes it over and
+        /// later leaves, it goes SSD as usual.
+        /// </summary>
+        private void NotSsdWithoutPlayer(EntityUid uid)
+        {
+            if (!TryComp<SSDIndicatorComponent>(uid, out var ssd) || !IsAiWithoutPlayer(uid))
+                return;
+
+            ssd.IsSSD = false;
+            Dirty(uid, ssd);
+            _statusEffects.TryRemoveStatusEffect(uid, SSDIndicatorSystem.StatusEffectSSDSleeping);
         }
 
         public void OnNPCMapInit(EntityUid uid, HTNComponent component, MapInitEvent args)

@@ -14,6 +14,7 @@ namespace Content.Shared.Nutrition.EntitySystems;
 public abstract partial class SatiationSystem : EntitySystem
 {
     [Dependency] private IGameTiming _timing = default!;
+    [Dependency] private Robust.Shared.Network.INetManager _net = default!;
 
     [Dependency] private AlertsSystem _alerts = default!;
 
@@ -49,6 +50,34 @@ public abstract partial class SatiationSystem : EntitySystem
                     SetAuthoritativeValue(entity, satiation, proto, CalculateCurrentValue(satiation, proto));
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Fixes up satiations loaded from a world save.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Satiation.SatiationType"/> isn't saved and is normally only set on MapInit, which loaded entities
+    /// never get. Without it, the next threshold/alert times can't be worked out and end up null, so the entity stops
+    /// getting hungry/thirsty alerts and effects. Restore the type from the dictionary key and recalculate the schedule
+    /// from the current value (this also repairs saves that already have the null times).
+    /// </remarks>
+    [SubscribeLocalEvent]
+    private void OnStartup(Entity<SatiationComponent> entity, ref ComponentStartup args)
+    {
+        foreach (var (type, satiation) in entity.Comp.Satiations)
+        {
+            satiation.SatiationType = type;
+
+            // Not yet initialized (a freshly spawned entity): MapInit sets everything up.
+            if (_net.IsClient || satiation.LastAuthoritativeValue == float.MinValue)
+                continue;
+
+            if (!ProtoMan.Resolve(satiation.Prototype, out var proto))
+                continue;
+
+            SetAuthoritativeValue(entity, satiation, proto, CalculateCurrentValue(satiation, proto));
+            UpdateAlerts(entity, satiation, proto);
         }
     }
 

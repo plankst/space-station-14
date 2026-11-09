@@ -133,7 +133,8 @@ public abstract partial class SharedShuttleSystem : EntitySystem
 
     public bool CanDraw(EntityUid gridUid, PhysicsComponent? physics = null, IFFComponent? iffComp = null)
     {
-        if (!Resolve(gridUid, ref physics))
+        // Planets are grids without a physics body on the client; draw them, and don't log an error every frame.
+        if (!Resolve(gridUid, ref physics, false))
             return true;
 
         if (physics.BodyType != BodyType.Static && physics.Mass < (20f * TileDensityMultiplier)) // A grid of approx 20 tiles, to not draw tiny grids.

@@ -143,7 +143,9 @@ public abstract partial class MicrowaveSystem : EntitySystem
     [SubscribeLocalEvent]
     private void OnAnchorChanged(Entity<MicrowaveComponent> ent, ref AnchorStateChangedEvent args)
     {
-        if (!args.Anchored)
+        // Don't empty a microwave that is being deleted (e.g. the whole world unloading on shutdown); its contents go
+        // with it, and they're already being deleted too.
+        if (!args.Anchored && !args.Detaching && !TerminatingOrDeleted(ent))
             Container.EmptyContainer(ent.Comp.Storage);
     }
 

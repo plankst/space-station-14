@@ -32,6 +32,19 @@ public sealed partial class StationAnchorSystem : EntitySystem
         SetStatus(ent, true);
     }
 
+    /// <summary>
+    /// Whether a grid is pinned in place isn't saved (the shuttle's enabled flag isn't a data field), and anchors only
+    /// pin their grid on MapInit, which entities loaded from a save never get. Pins the grid again for every loaded
+    /// anchor that is switched on.
+    /// </summary>
+    public void ReapplyLoadedAnchor(EntityUid uid)
+    {
+        if (!TryComp<StationAnchorComponent>(uid, out var comp) || !comp.SwitchedOn)
+            return;
+
+        SetStatus((uid, comp), true);
+    }
+
     private void OnActivated(Entity<StationAnchorComponent> ent, ref ChargedMachineActivatedEvent args)
     {
         SetStatus(ent, true);
