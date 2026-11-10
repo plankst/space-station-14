@@ -186,6 +186,11 @@ public sealed partial class TileSystem : EntitySystem
         if (!tileDef.CanCrowbar)
             return false;
 
+        // Plating can be crowbarred by players (through the tool system), but automatic prying (disposal exits,
+        // space wind, revenants, artifacts, chemicals) should still stop at plating like it did before.
+        if (tileDef.IsSubFloor && !pryPlating)
+            return false;
+
         return DeconstructTile(tileRef);
     }
 

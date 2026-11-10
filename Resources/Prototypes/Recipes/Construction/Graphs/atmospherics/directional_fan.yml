@@ -1,0 +1,26 @@
+- type: constructionGraph
+  id: DirectionalFan
+  start: start
+  graph:
+    - node: start
+      actions:
+        - !type:DeleteEntity {}
+      edges:
+        - to: fan
+          completed:
+            - !type:SnapToGrid {} # keeps the rotation it was placed with, so the blocked side faces the right way
+          steps:
+            - material: Steel
+              amount: 2
+              doAfter: 1
+    - node: fan
+      entity: AtmosDeviceFanDirectional
+      edges:
+        - to: start
+          completed:
+            - !type:SpawnPrototype
+              prototype: SheetSteel1
+              amount: 2
+          steps:
+            - tool: Screwing
+              doAfter: 1

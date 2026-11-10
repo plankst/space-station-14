@@ -22,4 +22,11 @@ public sealed partial class ExtractableComponent : Component
     /// </summary>
     [DataField]
     public string? GrindableSolutionName;
+
+    /// <summary>
+    /// A fixed set of reagents to put in the beaker when the grinder is set to grind mode, used instead of
+    /// <see cref="GrindableSolutionName"/> (e.g. organs grind into protein and fat, whatever they hold for eating).
+    /// </summary>
+    [DataField]
+    public Solution? GrindSolution;
 };

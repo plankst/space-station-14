@@ -95,6 +95,14 @@ public abstract partial class SharedSmartFridgeSystem : EntitySystem
 
             AddContained(ent, key, GetNetEntity(item));
         }
+
+        // Entries whose items have all been taken out stay listed (with 0 and an X); give them an empty set so the X
+        // can still clear them.
+        foreach (var key in ent.Comp.Entries)
+        {
+            if (!ent.Comp.ContainedEntries.ContainsKey(key))
+                ent.Comp.ContainedEntries[key] = new HashSet<NetEntity>();
+        }
     }
 
     // The sets in ContainedEntries are shared with the last networked state (its auto-generated state only copies the
@@ -207,8 +215,8 @@ public abstract partial class SharedSmartFridgeSystem : EntitySystem
         if (!Allowed(ent, args.Actor))
             return;
 
-        if (!ent.Comp.ContainedEntries.TryGetValue(args.Entry, out var contained)
-            || contained.Count > 0
+        // No item set at all counts as empty too.
+        if (ent.Comp.ContainedEntries.TryGetValue(args.Entry, out var contained) && contained.Count > 0
             || !ent.Comp.Entries.Contains(args.Entry))
             return;
 

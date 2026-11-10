@@ -1,7 +1,11 @@
+using System.Collections.Generic;
+using System.Linq;
+using Robust.Shared.GameObjects;
 using Content.IntegrationTests.Fixtures.Attributes;
 using Content.IntegrationTests.Tests.Interaction;
 using Content.Shared.Eye.Blinding.Components;
 using Content.Shared.Eye.Blinding.Systems;
+using Content.Shared.Inventory;
 using Robust.Shared.Prototypes;
 
 namespace Content.IntegrationTests.Tests.Eye;
@@ -63,5 +67,47 @@ public sealed class EyeDamageTests : InteractionTest
         await InteractUsing(Weld);
 
         Assert.That(blindableComponent.EyeDamage, Is.EqualTo(initialEyeDamage), "Eye damage inflicted despite protection");
+    }
+
+    /// <summary>
+    /// Every hardsuit and EVA helmet shields from welding like a welding mask.
+    /// </summary>
+    [Test]
+    public async Task HardsuitAndEvaHelmetsProtectEyes()
+    {
+        var bases = new[] { "ClothingHeadHardsuitBase", "ClothingHeadEVAHelmetBase" };
+        var helmets = new List<string>();
+        await Server.WaitPost(() =>
+        {
+            var factory = SEntMan.ComponentFactory;
+            foreach (var proto in ProtoMan.EnumeratePrototypes<EntityPrototype>())
+            {
+                if (proto.Abstract || !ProtoMan.EnumerateAllParents<EntityPrototype>(proto.ID).Any(p => bases.Contains(p.id)))
+                    continue;
+
+                helmets.Add(proto.ID);
+                Assert.That(proto.Components.ContainsKey(factory.GetComponentName<EyeProtectionComponent>()), $"{proto.ID} doesn't protect from welding");
+            }
+        });
+        Assert.That(helmets, Has.Count.GreaterThan(20).And.Contains("ClothingHeadHelmetEVA").And.Contains("ClothingHeadHelmetHardsuitEngineering"));
+    }
+
+    /// <summary>
+    /// Welding while wearing an EVA helmet doesn't hurt your eyes.
+    /// </summary>
+    [Test]
+    public async Task WeldingInEvaHelmetDoesNoEyeDamage()
+    {
+        var blindableComponent = Comp<BlindableComponent>(Player);
+        await SpawnTarget(LockerPrototype);
+
+        await Server.WaitPost(() =>
+        {
+            var helmet = SEntMan.SpawnEntity("ClothingHeadHelmetEVA", SEntMan.GetComponent<TransformComponent>(SPlayer).Coordinates);
+            Assert.That(SEntMan.System<InventorySystem>().TryEquip(SPlayer, helmet, "head", silent: true, force: true));
+        });
+
+        await InteractUsing(Weld);
+        Assert.That(blindableComponent.EyeDamage, Is.Zero, "Welding hurt the eyes through an EVA helmet");
     }
 }

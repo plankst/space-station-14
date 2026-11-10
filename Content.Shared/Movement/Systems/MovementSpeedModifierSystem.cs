@@ -22,6 +22,7 @@ namespace Content.Shared.Movement.Systems
         {
             base.Initialize();
             SubscribeLocalEvent<MovementSpeedModifierComponent, MapInitEvent>(OnModMapInit);
+            SubscribeLocalEvent<MovementSpeedModifierComponent, ComponentStartup>(OnModStartup);
             SubscribeLocalEvent<MovementSpeedModifierComponent, DownedEvent>(OnDowned);
             SubscribeLocalEvent<MovementSpeedModifierComponent, StoodEvent>(OnStand);
 
@@ -42,6 +43,13 @@ namespace Content.Shared.Movement.Systems
             ent.Comp.Friction = _frictionModifier * ent.Comp.BaseFriction;
             ent.Comp.FrictionNoInput = _frictionModifier * ent.Comp.BaseFriction;
             Dirty(ent);
+        }
+
+        // The current walk/sprint multipliers aren't saved, so a mob loaded from a world save would move at full speed
+        // (ignoring whatever slows it) until something happened to make it recalculate. Work them out on startup.
+        private void OnModStartup(Entity<MovementSpeedModifierComponent> ent, ref ComponentStartup args)
+        {
+            RefreshMovementSpeedModifiers((ent, ent.Comp));
         }
 
         private void OnDowned(Entity<MovementSpeedModifierComponent> entity, ref DownedEvent args)

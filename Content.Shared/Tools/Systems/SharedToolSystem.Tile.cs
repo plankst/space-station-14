@@ -50,13 +50,17 @@ public abstract partial class SharedToolSystem
         if (comp.RequiresUnobstructed && _turfs.IsTileBlocked(gridUid, tileRef.GridIndices, CollisionGroup.MobMask))
             return;
 
+        // Work out the position before removing the tile: removing a small grid's last tile deletes the grid, and
+        // logging a position on a deleted grid threw.
+        var mapCoords = _transformSystem.ToMapCoordinates(coords);
+
         if (!TryDeconstructWithToolQualities(tileRef, tool.Qualities))
             return;
 
         AdminLogger.Add(
             LogType.LatticeCut,
             LogImpact.Medium,
-            $"{ToPrettyString(args.User):player} used {ToPrettyString(ent)} to edit the tile at {coords}");
+            $"{ToPrettyString(args.User):player} used {ToPrettyString(ent)} to edit the tile at {mapCoords}");
         args.Handled = true;
     }
 
@@ -88,7 +92,7 @@ public abstract partial class SharedToolSystem
             return false;
 
         var args = new TileToolDoAfterEvent(GetNetEntity(gridUid), tileRef.GridIndices);
-        UseTool(ent, user, ent, comp.Delay, tool.Qualities, args, out _, toolComponent: tool);
+        UseTool(ent, user, ent, comp.Delay * tileDef.DeconstructTimeMultiplier, tool.Qualities, args, out _, toolComponent: tool);
         return true;
     }
 

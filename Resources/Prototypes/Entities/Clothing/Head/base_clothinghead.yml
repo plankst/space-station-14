@@ -136,6 +136,7 @@
     - WhitelistChameleon
     - HelmetEVA
   - type: IdentityBlocker
+  - type: EyeProtection # Visor shields from welding like a welding mask.
   - type: HideLayerClothing
     slots:
     - Hair
@@ -187,6 +188,7 @@
     tags:
     - WhitelistChameleon
   - type: IdentityBlocker
+  - type: EyeProtection # Visor shields from welding like a welding mask.
   - type: HideLayerClothing
     slots:
     - Hair

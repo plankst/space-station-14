@@ -114,6 +114,15 @@ public abstract partial class SharedGunSystem : EntitySystem
         SubscribeLocalEvent<GunComponent, CycleModeEvent>(OnCycleMode);
         SubscribeLocalEvent<GunComponent, HandSelectedEvent>(OnGunSelected);
         SubscribeLocalEvent<GunComponent, MapInitEvent>(OnMapInit);
+        SubscribeLocalEvent<GunComponent, ComponentStartup>(OnGunStartup);
+    }
+
+    // The working stats (fire rate, burst, spread, projectile speed, recoil, sound) aren't saved and used to only be
+    // worked out on MapInit, which entities loaded from a world save never get: loaded guns had a fire rate of 0 and
+    // couldn't fire at all. Work them out on startup too.
+    private void OnGunStartup(Entity<GunComponent> gun, ref ComponentStartup args)
+    {
+        RefreshModifiers((gun, gun));
     }
 
     private void OnMapInit(Entity<GunComponent> gun, ref MapInitEvent args)

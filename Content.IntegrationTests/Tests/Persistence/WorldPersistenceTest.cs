@@ -1855,6 +1855,95 @@ public sealed class WorldPersistenceTest : GameTest
     }
 
     /// <summary>
+    /// An item that was all taken out stays listed with 0 and an X to clear it. After a load the X did nothing, because
+    /// the emptied entry came back without its (empty) item list.
+    /// </summary>
+    [Test]
+    public async Task EmptiedSmartFridgeEntryCanBeClearedAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var containers = entMan.System<Robust.Shared.Containers.SharedContainerSystem>();
+        var fridgeSys = entMan.System<Content.Shared.SmartFridge.SharedSmartFridgeSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string fridgeName = "Persistent Emptied Fridge";
+
+        EntityUid? FindFridge()
+        {
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.SmartFridge.SmartFridgeComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName == fridgeName)
+                    return uid;
+            }
+
+            return null;
+        }
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                mapSys.SetTile(grid, gridComp, new Vector2i(0, 0), new Tile(1));
+                var coords = new EntityCoordinates(grid, 0.5f, 0.5f);
+                var fridge = entMan.SpawnEntity("SmartFridge", coords);
+                entMan.System<MetaDataSystem>().SetEntityName(fridge, fridgeName);
+                var comp = entMan.GetComponent<Content.Shared.SmartFridge.SmartFridgeComponent>(fridge);
+                var container = containers.GetContainer(fridge, comp.Container);
+                Assert.That(containers.Insert(entMan.SpawnEntity("FoodApple", coords), container));
+                var banana = entMan.SpawnEntity("FoodBanana", coords);
+                Assert.That(containers.Insert(banana, container));
+
+                // Take the last banana out: it stays listed, empty.
+                Assert.That(containers.Remove(banana, container));
+                entMan.DeleteEntity(banana);
+                Assert.That(comp.Entries, Has.Count.EqualTo(2), "Test setup: the emptied entry should stay listed");
+                break;
+            }
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var fridge = FindFridge();
+            Assert.That(fridge, Is.Not.Null, "The fridge is missing after loading");
+            var comp = entMan.GetComponent<Content.Shared.SmartFridge.SmartFridgeComponent>(fridge!.Value);
+            Assert.That(comp.Entries, Has.Count.EqualTo(2), "The emptied entry should still be listed after loading");
+
+            var emptied = comp.Entries.Single(e => !comp.ContainedEntries.TryGetValue(e, out var set) || set.Count == 0);
+            var user = entMan.SpawnEntity("MobHuman", entMan.GetComponent<TransformComponent>(fridge.Value).Coordinates);
+            var msg = new Content.Shared.SmartFridge.SmartFridgeRemoveEntryMessage(emptied) { Actor = user };
+
+            // Press the X.
+            var method = typeof(Content.Shared.SmartFridge.SharedSmartFridgeSystem).GetMethod("OnRemoveEntry",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var args = new object[] { new Entity<Content.Shared.SmartFridge.SmartFridgeComponent>(fridge.Value, comp), msg };
+            method.Invoke(fridgeSys, args);
+
+            Assert.That(comp.Entries, Has.Count.EqualTo(1), "The X didn't clear the emptied entry after loading");
+            Assert.That(comp.Entries, Does.Not.Contain(emptied));
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
     /// Salvage magnet salvage works like expeditions: whatever the magnet pulled in (and any stranded holding map) is
     /// never saved, players standing on it are brought home before the save, and after loading the magnet is fresh
     /// with new offers, as if it had never been used.
@@ -2089,6 +2178,372 @@ public sealed class WorldPersistenceTest : GameTest
 
                 Assert.That(entMan.System<Content.Server.Shuttles.Systems.ShuttleSystem>().CanFTL(shuttle, out var reason),
                     $"The shuttle can't fly after loading: {reason}");
+            });
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Every gun keeps working after a load: its working stats (fire rate, burst size, spread, projectile speed, recoil,
+    /// gunshot sound) match a freshly spawned one, and representative guns still fire, including after swapping in a
+    /// fresh magazine. The working stats aren't saved and were only worked out on MapInit, so after a load guns had a
+    /// fire rate of 0 and couldn't fire at all.
+    /// </summary>
+    [Test]
+    public async Task GunsWorkAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var protoMan = server.ResolveDependency<IPrototypeManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var gunSys = entMan.System<Content.Shared.Weapons.Ranged.Systems.SharedGunSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string prefix = "Persistent Test Gun ";
+        // Guns fired after the load: magazine pistols (racked before the save, so a round is chambered) and a laser.
+        var firing = new[] { "WeaponPistolViper", "WeaponPistolMk58", "WeaponLaserGun" };
+
+        // Every gun that's a plain item (no mobs, turrets, mechs or things that need special setup).
+        var guns = protoMan.EnumeratePrototypes<EntityPrototype>()
+            .Where(p => !p.Abstract && p.Components.ContainsKey("Gun") && p.Components.ContainsKey("Item") &&
+                        !p.Components.ContainsKey("MobState") && !pair.IsTestPrototype(p))
+            .Select(p => p.ID)
+            .ToList();
+        Assert.That(guns, Is.SupersetOf(firing));
+
+        string Stats(Content.Shared.Weapons.Ranged.Components.GunComponent g) =>
+            $"rate={g.FireRateModified} burst={g.ShotsPerBurstModified} speed={g.ProjectileSpeedModified} " +
+            $"spread={g.MinAngleModified.Degrees:0.##}-{g.MaxAngleModified.Degrees:0.##} +{g.AngleIncreaseModified.Degrees:0.##}/-{g.AngleDecayModified.Degrees:0.##} " +
+            $"recoil={g.CameraRecoilScalarModified} sound={(g.SoundGunshotModified == null ? "none" : "yes")}";
+
+        var expected = new Dictionary<string, string>();
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                for (var i = 0; i < guns.Count; i++)
+                {
+                    mapSys.SetTile(grid, gridComp, new Vector2i(i % 40, 70 + i / 40), new Tile(1));
+                    var gun = entMan.SpawnEntity(guns[i], new EntityCoordinates(grid, i % 40 + 0.5f, 70 + i / 40 + 0.5f));
+                    entMan.System<MetaDataSystem>().SetEntityName(gun, prefix + guns[i]);
+                    expected[guns[i]] = Stats(entMan.GetComponent<Content.Shared.Weapons.Ranged.Components.GunComponent>(gun));
+                }
+
+                break;
+            }
+        });
+        await pair.RunTicksSync(5);
+
+        // Rack the guns we'll fire (chambering a round), like a player would have before the server went down.
+        Dictionary<string, EntityUid> SpawnedGuns()
+        {
+            var found = new Dictionary<string, EntityUid>();
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Weapons.Ranged.Components.GunComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName.StartsWith(prefix))
+                    found[meta.EntityName[prefix.Length..]] = uid;
+            }
+
+            return found;
+        }
+
+        EntityUid racker = default;
+        await server.WaitPost(() =>
+        {
+            var gunsNow = SpawnedGuns();
+            racker = entMan.SpawnEntity("MobHuman", entMan.GetComponent<TransformComponent>(gunsNow[firing[0]]).Coordinates);
+        });
+        foreach (var id in firing)
+        {
+            await server.WaitPost(() =>
+            {
+                var gun = SpawnedGuns()[id];
+                entMan.System<Content.Shared.Hands.EntitySystems.SharedHandsSystem>().TryPickupAnyHand(racker, gun);
+                entMan.System<Content.Shared.Interaction.SharedInteractionSystem>().UseInHandInteraction(racker, gun);
+            });
+            await pair.RunTicksSync(30);
+            await server.WaitPost(() => entMan.System<Content.Shared.Hands.EntitySystems.SharedHandsSystem>().TryDrop(racker, SpawnedGuns()[id]));
+        }
+
+        await server.WaitPost(() => entMan.DeleteEntity(racker));
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        Dictionary<string, EntityUid> FindGuns()
+        {
+            var found = new Dictionary<string, EntityUid>();
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Weapons.Ranged.Components.GunComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName.StartsWith(prefix))
+                    found[meta.EntityName[prefix.Length..]] = uid;
+            }
+
+            return found;
+        }
+
+        await server.WaitPost(() =>
+        {
+            var found = FindGuns();
+            var wrong = expected
+                .Where(kv => !found.TryGetValue(kv.Key, out var uid) ||
+                             Stats(entMan.GetComponent<Content.Shared.Weapons.Ranged.Components.GunComponent>(uid)) != kv.Value)
+                .Select(kv => $"{kv.Key}: {kv.Value} -> " + (found.TryGetValue(kv.Key, out var uid)
+                    ? Stats(entMan.GetComponent<Content.Shared.Weapons.Ranged.Components.GunComponent>(uid))
+                    : "missing"))
+                .ToList();
+            Assert.That(wrong, Is.Empty, $"{wrong.Count} gun(s) have different stats after loading:\n" + string.Join("\n", wrong.Take(15)));
+        });
+
+        // They still fire: a person picks each one up and shoots, without racking it again (it was racked before
+        // the save, so a round should still be chambered).
+        var hands = entMan.System<Content.Shared.Hands.EntitySystems.SharedHandsSystem>();
+        var interaction = entMan.System<Content.Shared.Interaction.SharedInteractionSystem>();
+        EntityUid shooter = default;
+        await server.WaitPost(() =>
+        {
+            var anyGun = FindGuns()[firing[0]];
+            shooter = entMan.SpawnEntity("MobHuman", entMan.GetComponent<TransformComponent>(anyGun).Coordinates);
+            entMan.System<Content.Shared.CombatMode.SharedCombatModeSystem>().SetInCombatMode(shooter, true);
+        });
+
+        async Task<(int Before, int After)> Shoot(string id, bool rack)
+        {
+            EntityUid gun = default;
+            await server.WaitPost(() =>
+            {
+                gun = FindGuns()[id];
+                hands.TryPickupAnyHand(shooter, gun);
+            });
+            await pair.RunTicksSync(60);
+            if (rack)
+            {
+                await server.WaitPost(() => interaction.UseInHandInteraction(shooter, gun));
+                await pair.RunTicksSync(60);
+            }
+
+            var result = (0, 0);
+            await server.WaitPost(() =>
+            {
+                var before = gunSys.GetAmmoCount(gun);
+                var coords = entMan.GetComponent<TransformComponent>(shooter).Coordinates.Offset(new System.Numerics.Vector2(3, 0));
+                gunSys.AttemptShoot(shooter, (gun, entMan.GetComponent<Content.Shared.Weapons.Ranged.Components.GunComponent>(gun)), coords);
+                result = (before, gunSys.GetAmmoCount(gun));
+                hands.TryDrop(shooter, gun);
+            });
+            return result;
+        }
+
+        var fired = new Dictionary<string, (int Before, int After)>();
+        foreach (var id in firing)
+        {
+            fired[id] = await Shoot(id, rack: false);
+        }
+
+        Assert.Multiple(() =>
+        {
+            foreach (var (id, (before, after)) in fired)
+            {
+                Assert.That(after, Is.LessThan(before), $"{id} didn't fire after loading (ammo {before} -> {after})");
+            }
+        });
+
+        // Swap a fresh magazine into the pistol, rack it and fire from it.
+        await server.WaitPost(() =>
+        {
+            var gun = FindGuns()["WeaponPistolViper"];
+            var slots = entMan.System<Content.Shared.Containers.ItemSlots.ItemSlotsSystem>();
+            Assert.That(slots.TryEject(gun, "gun_magazine", null, out var oldMag), "Couldn't take the magazine out after loading");
+            entMan.DeleteEntity(oldMag);
+            var mag = entMan.SpawnEntity("MagazinePistol", entMan.GetComponent<TransformComponent>(gun).Coordinates);
+            Assert.That(slots.TryInsert(gun, "gun_magazine", mag, null), "Couldn't put a fresh magazine in after loading");
+        });
+
+        var (magBefore, magAfter) = await Shoot("WeaponPistolViper", rack: true);
+        Assert.That(magAfter, Is.LessThan(magBefore), $"The pistol didn't fire from a fresh magazine after loading (ammo {magBefore} -> {magAfter})");
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A mob's current speed multipliers aren't saved. After a load they have to be worked out again, or a slowed mob
+    /// moves at full speed until something happens to change its speed. A zombified crewmember (slowed to 70%, and with
+    /// nothing like hunger around to happen to trigger a recalculation) is the example here.
+    /// </summary>
+    [Test]
+    public async Task SlowedMobsStaySlowAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string name = "Persistent Test Shambler";
+        float walkBefore = 0, sprintBefore = 0;
+
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                mapSys.SetTile(grid, gridComp, new Vector2i(0, 0), new Tile(1));
+                var mob = entMan.SpawnEntity("MobHuman", new EntityCoordinates(grid, 0.5f, 0.5f));
+                entMan.System<Content.Server.Zombies.ZombieSystem>().ZombifyEntity(mob);
+                entMan.System<MetaDataSystem>().SetEntityName(mob, name);
+                var move = entMan.GetComponent<Content.Shared.Movement.Components.MovementSpeedModifierComponent>(mob);
+                walkBefore = move.WalkSpeedModifier;
+                sprintBefore = move.SprintSpeedModifier;
+                break;
+            }
+        });
+        await pair.RunTicksSync(5);
+        Assert.That(walkBefore, Is.LessThan(1f), "Test setup: the zombie isn't slowed");
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Movement.Components.MovementSpeedModifierComponent, MetaDataComponent>();
+            var found = false;
+            while (q.MoveNext(out _, out var move, out var meta))
+            {
+                if (!meta.EntityName.Contains(name))
+                    continue;
+
+                found = true;
+                Assert.That(move.WalkSpeedModifier, Is.EqualTo(walkBefore).Within(0.001f), "The zombie walks at a different speed after loading");
+                Assert.That(move.SprintSpeedModifier, Is.EqualTo(sprintBefore).Within(0.001f), "The zombie runs at a different speed after loading");
+            }
+
+            Assert.That(found, "The zombie is missing");
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Pieces that split off magnet salvage (e.g. mined-off asteroid chunks) belong to the magnet too: they aren't saved,
+    /// and players standing on one are brought home. Nothing used to track split-off pieces, so they stayed in the
+    /// world forever.
+    /// </summary>
+    [Test]
+    public async Task MagnetSalvageSplitPiecesAreNotSaved()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var playerMan = server.ResolveDependency<IPlayerManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var salvage = entMan.System<Content.Server.Salvage.SalvageSystem>();
+        var stationSys = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+        var mapSys = entMan.System<SharedMapSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string rockName = "Persistent Test Rock";
+        const string minerName = "Persistent Test Miner";
+        EntityUid station = default;
+        EntityUid rock = default;
+
+        await server.WaitPost(() =>
+        {
+            station = stationSys.GetStations().First().Owner;
+            var data = entMan.EnsureComponent<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station);
+
+            // A pulled-in rock three tiles long.
+            var grid = mapSys.CreateGridEntity(ticker.DefaultMap);
+            entMan.System<SharedTransformSystem>().SetWorldPosition(grid.Owner, new System.Numerics.Vector2(200, 200));
+            for (var x = 0; x < 3; x++)
+            {
+                mapSys.SetTile(grid, new Vector2i(x, 0), new Tile(1));
+            }
+
+            entMan.System<MetaDataSystem>().SetEntityName(grid, rockName);
+            rock = grid.Owner;
+            salvage.TrackMagnetGrid((station, data), rock);
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() =>
+        {
+            // Mine out the middle: the rock splits in two.
+            mapSys.SetTile(rock, entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(rock), new Vector2i(1, 0), Tile.Empty);
+        });
+        await pair.RunTicksSync(5);
+
+        var player = playerMan.Sessions.Single();
+        await server.WaitPost(() =>
+        {
+            var data = entMan.GetComponent<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station);
+            var pieces = salvage.GetActiveMagnetGrids(data).ToList();
+            Assert.That(pieces, Has.Count.EqualTo(2), "The piece that split off isn't tracked by the magnet");
+
+            // A miner standing on the piece that broke off.
+            var piece = pieces.First(p => p != rock);
+            var tile = mapSys.GetAllTiles(piece, entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(piece)).First();
+            var miner = entMan.SpawnEntity("MobHuman", mapSys.GridTileToLocal(piece, entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(piece), tile.GridIndices));
+            entMan.System<MetaDataSystem>().SetEntityName(miner, minerName);
+            var minds = entMan.System<SharedMindSystem>();
+            minds.TransferTo(minds.CreateMind(player.UserId, minerName), miner);
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(30);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            Assert.Multiple(() =>
+            {
+                var grids = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, MetaDataComponent>();
+                while (grids.MoveNext(out _, out _, out var meta))
+                {
+                    Assert.That(meta.EntityName, Does.Not.Contain(rockName), "A piece of the magnet salvage was saved");
+                }
+
+                var mobs = entMan.AllEntityQueryEnumerator<Content.Shared.Inventory.InventoryComponent, MetaDataComponent, TransformComponent>();
+                var found = false;
+                while (mobs.MoveNext(out _, out _, out var meta, out var xform))
+                {
+                    if (meta.EntityName != minerName)
+                        continue;
+
+                    found = true;
+                    var stationGrid = stationSys.GetLargestGrid(stationSys.GetStations().First().Owner);
+                    Assert.That(xform.GridUid, Is.EqualTo(stationGrid), "The miner on the split-off piece wasn't brought home");
+                }
+
+                Assert.That(found, "The miner was lost");
             });
         });
 
@@ -2541,6 +2996,121 @@ public sealed class WorldPersistenceTest : GameTest
         }
 
         return counts;
+    }
+
+    /// <summary>
+    /// Autosaves run once per <see cref="CCVars.PersistenceAutosaveInterval"/> of game time, on a single clock (no
+    /// doubled or extra saves).
+    /// </summary>
+    [Test]
+    public async Task AutosaveRunsOncePerInterval()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var res = server.ResolveDependency<IResourceManager>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, false);
+        await pair.RunTicksSync(1);
+
+        const float interval = 2f;
+        var start = 0;
+        await server.WaitPost(() =>
+        {
+            start = persistence.AutosavesStarted;
+            // Setting the interval restarts its countdown from now.
+            server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, interval);
+        });
+
+        // 7 seconds of game time: saves at 2, 4 and 6 seconds.
+        var ticks = 7 * (int) server.Timing.TickRate + 1;
+        await pair.RunTicksSync(ticks);
+        await server.WaitPost(() => persistence.WaitForPendingWrite());
+
+        Assert.That(persistence.AutosavesStarted - start, Is.EqualTo(3),
+            "Autosaves didn't run exactly once per interval");
+        await server.WaitPost(() => Assert.That(res.UserData.Exists(persistence.AutosavePath), "No autosave file was written"));
+
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        await server.WaitPost(() =>
+        {
+            if (res.UserData.Exists(persistence.AutosavePath))
+                res.UserData.Delete(persistence.AutosavePath);
+        });
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Saving while someone is mid-construction (which can't be written to a save) used to drop that player and
+    /// everything on them from the save. Now in-progress actions are just left out, and keep going in the live game.
+    /// </summary>
+    [Test]
+    public async Task PlayerMidConstructionIsStillSaved()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+        var doAfterSys = entMan.System<Content.Shared.DoAfter.SharedDoAfterSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string builderName = "Persistent Test Builder";
+        EntityUid builder = default;
+
+        await server.WaitPost(() =>
+        {
+            builder = entMan.SpawnEntity("MobHuman", new MapCoordinates(0, 0, ticker.DefaultMap));
+            entMan.System<MetaDataSystem>().SetEntityName(builder, builderName);
+
+            // A construction step in progress, the same kind as in the error report.
+            var ev = (Content.Shared.Construction.ConstructionInteractDoAfterEvent) Activator.CreateInstance(
+                typeof(Content.Shared.Construction.ConstructionInteractDoAfterEvent), nonPublic: true)!;
+            ev.ClickLocation = entMan.GetNetCoordinates(entMan.GetComponent<TransformComponent>(builder).Coordinates);
+            var args = new Content.Shared.DoAfter.DoAfterArgs(entMan, builder, TimeSpan.FromMinutes(10), ev, builder)
+            {
+                BreakOnMove = false,
+                BreakOnDamage = false,
+                NeedHand = false,
+            };
+            Assert.That(doAfterSys.TryStartDoAfter(args), "Test setup: couldn't start the construction do-after");
+        });
+        await pair.RunTicksSync(2);
+
+        int Running() => entMan.GetComponent<Content.Shared.DoAfter.DoAfterComponent>(builder).DoAfters.Count;
+
+        await server.WaitPost(() =>
+        {
+            Assert.That(Running(), Is.EqualTo(1), "Test setup");
+            Assert.That(persistence.SaveWorld("test"), "The save failed");
+            Assert.That(Running(), Is.EqualTo(1), "Saving interrupted the action in progress");
+        });
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var found = false;
+            var q = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (q.MoveNext(out _, out var meta))
+            {
+                if (meta.EntityName == builderName)
+                    found = true;
+            }
+
+            Assert.That(found, "The player who was mid-construction is missing from the save");
+        });
+
+        await Cleanup(pair);
     }
 
     private static async Task Cleanup(Pair.TestPair pair)

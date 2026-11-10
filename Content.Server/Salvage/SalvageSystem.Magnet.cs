@@ -81,13 +81,28 @@ public sealed partial class SalvageSystem
     private void OnMagnetTargetSplit(EntityUid uid, SalvageMagnetTargetComponent component, ref GridSplitEvent args)
     {
         // Don't think I'm not onto you people splitting to make new grids.
-        if (TryComp(component.DataTarget, out SalvageMagnetDataComponent? dataComp))
+        if (TryComp(component.DataTarget, out SalvageMagnetDataComponent? dataComp) && dataComp.ActiveEntities != null)
         {
             foreach (var gridUid in args.NewGrids)
             {
-                dataComp.ActiveEntities?.Add(gridUid);
+                TrackMagnetGrid((component.DataTarget, dataComp), gridUid);
             }
         }
+    }
+
+    /// <summary>
+    /// Counts a grid as pulled in by this station's magnet, including any pieces that later split off it. Those get
+    /// removed when the magnet lets go, and are never saved into the world.
+    /// </summary>
+    public void TrackMagnetGrid(Entity<SalvageMagnetDataComponent> data, EntityUid grid)
+    {
+        data.Comp.ActiveEntities ??= new List<EntityUid>();
+        if (!data.Comp.ActiveEntities.Contains(grid))
+            data.Comp.ActiveEntities.Add(grid);
+
+        // Nothing used to add this, so pieces that split off (e.g. loose asteroid chunks) weren't tracked: they never
+        // went away and got saved into the world, and players standing on one weren't brought home.
+        EnsureComp<SalvageMagnetTargetComponent>(grid).DataTarget = data.Owner;
     }
 
     private void UpdateMagnet()
@@ -420,8 +435,7 @@ public sealed partial class SalvageSystem
             _transform.SetParent(mapChild, salvXForm, spawnUid.Value);
             _transform.SetWorldPositionRotation(mapChild, spawnLocation.Position + localPos, spawnAngle, salvXForm);
 
-            data.Comp.ActiveEntities ??= new List<EntityUid>();
-            data.Comp.ActiveEntities?.Add(mapChild);
+            TrackMagnetGrid(data, mapChild);
 
             // Handle mob restrictions
             var children = salvXForm.ChildEnumerator;

@@ -41,6 +41,16 @@
     tags:
     - Raw
     - Meat
+  # Organs are useful leftovers: the biomass reclaimer takes them, and they grind into protein and fat.
+  - type: FixedBiomassYield
+    amount: 10
+  - type: Extractable
+    grindSolution:
+      reagents:
+      - ReagentId: Protein
+        Quantity: 5
+      - ReagentId: Fat
+        Quantity: 1
 
 - type: entity
   parent:

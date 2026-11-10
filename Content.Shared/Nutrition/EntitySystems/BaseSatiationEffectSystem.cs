@@ -54,7 +54,19 @@ public abstract partial class BaseSatiationEffectSystem<TComp, T> : EntitySystem
     private void OnStartup(Entity<TComp> entity, ref ComponentStartup args)
     {
         if (!_satiationQuery.TryComp(entity, out var comp))
+        {
+            // No satiation to go by (e.g. a zombie, which loses its hunger): use the neutral value rather than
+            // default(T), which for a speed multiplier is 0 and would freeze the mob in place.
+            foreach (var thresholds in GetThresholds(entity.Comp).Values)
+            {
+                thresholds.Current = DefaultValue();
+                thresholds.ProjectedThresholdChangeTime = null;
+            }
+
+            // Whatever uses the value (e.g. movement speed) may have been worked out before this started up.
+            AfterSatiationUpdate(entity);
             return;
+        }
 
         foreach (var type in GetThresholds(entity.Comp).Keys)
         {

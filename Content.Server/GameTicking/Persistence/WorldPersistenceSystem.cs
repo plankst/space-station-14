@@ -66,6 +66,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private PullingSystem _pulling = default!;
     [Dependency] private Content.Server.Salvage.SalvageSystem _salvage = default!;
     [Dependency] private SharedAudioSystem _audio = default!;
+    [Dependency] private Content.Shared.DoAfter.SharedDoAfterSystem _doAfter = default!;
 
     private bool _enabled;
     private ResPath _savePath;
@@ -82,6 +83,12 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// </summary>
     private readonly List<(FTLComponent Ftl, EntityUid? Startup, EntityUid? Travel)> _hiddenFtlSounds = new();
     private readonly List<(Content.Server.Salvage.Magnet.SalvageMagnetDataComponent Data, List<EntityUid> Grids)> _hiddenMagnetGrids = new();
+    private readonly List<(Content.Shared.DoAfter.DoAfterComponent Comp, Dictionary<ushort, Content.Shared.DoAfter.DoAfter> DoAfters)> _hiddenDoAfters = new();
+
+    /// <summary>
+    /// How many autosaves have been started since the server started (for tests and diagnostics).
+    /// </summary>
+    public int AutosavesStarted { get; private set; }
 
     /// <summary>
     /// A save that is still being written to disk in the background.
@@ -203,7 +210,10 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             return;
 
         if (CanSave())
+        {
+            AutosavesStarted++;
             SaveWorld("autosave", background: true, autosave: true);
+        }
     }
 
     /// <summary>
@@ -400,6 +410,13 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             }
 
             _hiddenMagnetGrids.Clear();
+
+            foreach (var (comp, doAfters) in _hiddenDoAfters)
+            {
+                _doAfter.SwapDoAfters(comp, doAfters);
+            }
+
+            _hiddenDoAfters.Clear();
 
             foreach (var proto in unsavable)
             {
@@ -938,6 +955,18 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             _hiddenFtlSounds.Add((ftl, ftl.StartupStream, ftl.TravelStream));
             ftl.StartupStream = null;
             ftl.TravelStream = null;
+        }
+
+        // Actions in progress (building, prying, eating...) aren't saved: some can't be (e.g. construction remembers
+        // where you clicked in a form that can't be written), and one failing used to drop the whole player and
+        // everything they carried from the save. They're put back right after, so nobody's action is interrupted.
+        var doAfters = AllEntityQuery<Content.Shared.DoAfter.DoAfterComponent>();
+        while (doAfters.MoveNext(out var doAfterComp))
+        {
+            if (doAfterComp.DoAfters.Count == 0)
+                continue;
+
+            _hiddenDoAfters.Add((doAfterComp, _doAfter.SwapDoAfters(doAfterComp, new())));
         }
     }
 

@@ -52,6 +52,12 @@ public sealed partial class ContentTileDefinition : IPrototype, IInheritingProto
     public HashSet<ProtoId<ToolQualityPrototype>> DeconstructTools = new();
 
     /// <summary>
+    /// Multiplies how long a tool takes to remove this tile (e.g. plating takes longer to pry up than a floor tile).
+    /// </summary>
+    [DataField]
+    public float DeconstructTimeMultiplier = 1f;
+
+    /// <summary>
     /// Effective mass of this tile for grid impacts.
     /// </summary>
     [DataField]

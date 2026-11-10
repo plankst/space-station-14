@@ -363,6 +363,10 @@ public abstract partial class SharedReagentGrinderSystem : EntitySystem
         switch (program)
         {
             case GrinderProgram.Grind:
+                // A copy: the grinder hands this straight to the beaker.
+                if (ent.Comp.GrindSolution is { } grindSolution)
+                    return new Solution(grindSolution);
+
                 if (ent.Comp.GrindableSolutionName is not { } solutionId)
                     return null;
 
@@ -388,6 +392,9 @@ public abstract partial class SharedReagentGrinderSystem : EntitySystem
     {
         if (!Resolve(ent, ref ent.Comp, false))
             return false;
+
+        if (ent.Comp.GrindSolution != null)
+            return true;
 
         if (ent.Comp.GrindableSolutionName == null)
             return false;

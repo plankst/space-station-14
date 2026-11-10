@@ -160,6 +160,17 @@ public abstract partial class SharedDoAfterSystem : EntitySystem
     }
 
     /// <summary>
+    /// Swaps an entity's do-after list for another one and returns the old list. World saving uses this to leave
+    /// in-progress actions out of the save (some can't be saved) and then put them back.
+    /// </summary>
+    public Dictionary<ushort, DoAfter> SwapDoAfters(DoAfterComponent comp, Dictionary<ushort, DoAfter> doAfters)
+    {
+        var old = comp.DoAfters;
+        comp.DoAfters = doAfters;
+        return old;
+    }
+
+    /// <summary>
     /// Adds entities which have an active DoAfter matching the target.
     /// </summary>
     private void OnGetInteractingEntities(ref GetInteractingEntitiesEvent args)

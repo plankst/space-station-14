@@ -347,3 +347,9 @@
     values: [ GasTrinary, GasTrinaryAlt1, GasTrinaryAlt2 ]
   targetNode: pneumaticvalve
 # endregion Trinary
+
+- type: construction
+  parent: BaseAtmos
+  id: AtmosDeviceFanDirectional
+  graph: DirectionalFan
+  targetNode: fan

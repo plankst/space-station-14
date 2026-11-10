@@ -9,6 +9,9 @@
   materialComposition:
     Steel: 75 # 0.75 sheets; 0.5 for the lattice, 0.25 for the tile
   baseTurf: Lattice
+  # Crowbar it back up to lattice, refunding a steel floor tile (the default itemDrop). Slower than a floor tile.
+  deconstructTools: [ Prying ]
+  deconstructTimeMultiplier: 3
 
 - type: tile
   id: Plating
@@ -47,6 +50,7 @@
   footstepSounds:
     collection: FootstepHull
   itemDrop: FloorTileItemSteel
+  deconstructTools: [] # Indestructible hull: not pryable like normal plating.
   heatCapacity: 100000 #/tg/ has this set as "INFINITY." I don't know if that exists here so I've just added an extra 0
   indestructible: true
 

@@ -227,6 +227,9 @@ public abstract partial class BiomassReclaimerSystem : EntitySystem
 
     private float CalculateYield(Entity<PhysicsComponent> toProcess, Entity<BiomassReclaimerComponent> reclaimer)
     {
+        if (TryComp<FixedBiomassYieldComponent>(toProcess, out var fixedYield))
+            return fixedYield.Amount;
+
         var expectedYield = toProcess.Comp.FixturesMass * reclaimer.Comp.YieldPerUnitMass;
         if (_produceQuery.HasComp(toProcess))
             expectedYield *= reclaimer.Comp.ProduceYieldMultiplier;
@@ -330,7 +333,8 @@ public abstract partial class BiomassReclaimerSystem : EntitySystem
         if (_activeQuery.HasComp(reclaimer))
             return BiomassReclaimerInsertResult.Busy;
 
-        var isPlant = _produceQuery.HasComp(target);
+        // Plants and things with a fixed yield (e.g. organs) aren't alive, so no safety check for them.
+        var isPlant = _produceQuery.HasComp(target) || HasComp<FixedBiomassYieldComponent>(target);
         if (!IsValidTarget(target))
             return BiomassReclaimerInsertResult.InvalidTarget;
 
@@ -347,7 +351,7 @@ public abstract partial class BiomassReclaimerSystem : EntitySystem
 
     private bool IsValidTarget(EntityUid target)
     {
-        return (_produceQuery.HasComp(target) || _mobStateQuery.HasComp(target)) &&
+        return (_produceQuery.HasComp(target) || _mobStateQuery.HasComp(target) || HasComp<FixedBiomassYieldComponent>(target)) &&
                PhysicsQuery.HasComp(target);
     }
 }
