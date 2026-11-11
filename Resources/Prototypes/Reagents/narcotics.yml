@@ -248,6 +248,17 @@
         effectProto: StatusEffectSeeingRainbow
         time: 16
         type: Add
+      - !type:ModifyStatusEffect
+        effectProto: StatusEffectPainNumbness
+        time: 10
+      - !type:ModifyStatusEffect
+        effectProto: StatusEffectSafeApoptosis
+        time: 30
+      # Settles the stomach: clears nausea and blurriness.
+      - !type:ModifyStatusEffect
+        effectProto: StatusEffectWoozy
+        time: null
+        type: Remove
 
 - type: reagent
   id: Nicotine

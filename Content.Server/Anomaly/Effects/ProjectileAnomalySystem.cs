@@ -33,15 +33,17 @@ public sealed partial class ProjectileAnomalySystem : EntitySystem
 
     private void OnPulse(EntityUid uid, ProjectileAnomalyComponent component, ref AnomalyPulseEvent args)
     {
-        ShootProjectilesAtEntities(uid, component, args.Severity * args.PowerModifier);
+        ShootProjectilesAtEntities(uid, component, args.Severity * args.PowerModifier, true);
     }
 
     private void OnSupercritical(EntityUid uid, ProjectileAnomalyComponent component, ref AnomalySupercriticalEvent args)
     {
-        ShootProjectilesAtEntities(uid, component, args.PowerModifier);
+        // The anomaly is deleted right after going supercritical, so its shots don't name it as their shooter:
+        // projectiles pointing at a deleted shooter log an error every time they're sent to a player.
+        ShootProjectilesAtEntities(uid, component, args.PowerModifier, false);
     }
 
-    private void ShootProjectilesAtEntities(EntityUid uid, ProjectileAnomalyComponent component, float severity)
+    private void ShootProjectilesAtEntities(EntityUid uid, ProjectileAnomalyComponent component, float severity, bool anomalyIsShooter)
     {
         var projectileCount = (int)MathF.Round(MathHelper.Lerp(component.MinProjectiles, component.MaxProjectiles, severity));
 
@@ -76,7 +78,8 @@ public sealed partial class ProjectileAnomalySystem : EntitySystem
                 component,
                 xform.Coordinates,
                 targetCoords,
-                severity
+                severity,
+                anomalyIsShooter
             );
             projectileCount--;
         }
@@ -87,7 +90,8 @@ public sealed partial class ProjectileAnomalySystem : EntitySystem
         ProjectileAnomalyComponent component,
         EntityCoordinates coords,
         EntityCoordinates targetCoords,
-        float severity
+        float severity,
+        bool anomalyIsShooter
     )
     {
         var mapPos = _xform.ToMapCoordinates(coords);
@@ -104,6 +108,7 @@ public sealed partial class ProjectileAnomalySystem : EntitySystem
 
         comp.Damage *= severity;
 
-        _gunSystem.ShootProjectile(ent, direction, Vector2.Zero, uid, uid, component.ProjectileSpeed);
+        var shooter = anomalyIsShooter ? uid : (EntityUid?) null;
+        _gunSystem.ShootProjectile(ent, direction, Vector2.Zero, shooter, shooter, component.ProjectileSpeed);
     }
 }

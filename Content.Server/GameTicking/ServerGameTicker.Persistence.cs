@@ -41,6 +41,9 @@ public sealed partial class ServerGameTicker
         // Expeditions and FTL travel don't survive a save; clean up their leftovers.
         _expeditionFix.FixAfterLoad();
 
+        // Get saving ready while nobody has joined yet, so the first save (or a panic save) is quick.
+        _worldPersistence.WarmUpSaving();
+
         return true;
     }
 

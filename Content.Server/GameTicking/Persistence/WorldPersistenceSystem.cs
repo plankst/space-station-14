@@ -29,6 +29,7 @@ using Robust.Shared.Map.Components;
 using Robust.Shared.Map.Events;
 using Robust.Shared.Prototypes;
 using Robust.Shared.Serialization;
+using Robust.Shared.Serialization.Markdown;
 using Robust.Shared.Serialization.Markdown.Mapping;
 using Robust.Shared.Serialization.Markdown.Sequence;
 using Robust.Shared.Serialization.Markdown.Value;
@@ -67,6 +68,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     [Dependency] private Content.Server.Salvage.SalvageSystem _salvage = default!;
     [Dependency] private SharedAudioSystem _audio = default!;
     [Dependency] private Content.Shared.DoAfter.SharedDoAfterSystem _doAfter = default!;
+    [Dependency] private Content.Shared.Alert.AlertsSystem _alerts = default!;
 
     private bool _enabled;
     private ResPath _savePath;
@@ -84,6 +86,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     private readonly List<(FTLComponent Ftl, EntityUid? Startup, EntityUid? Travel)> _hiddenFtlSounds = new();
     private readonly List<(Content.Server.Salvage.Magnet.SalvageMagnetDataComponent Data, List<EntityUid> Grids)> _hiddenMagnetGrids = new();
     private readonly List<(Content.Shared.DoAfter.DoAfterComponent Comp, Dictionary<ushort, Content.Shared.DoAfter.DoAfter> DoAfters)> _hiddenDoAfters = new();
+    private readonly List<(ShuttleDestinationCoordinatesComponent Disk, EntityUid Destination)> _hiddenDiskDestinations = new();
 
     /// <summary>
     /// How many autosaves have been started since the server started (for tests and diagnostics).
@@ -136,6 +139,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
         // Runs during server startup, before any player can connect (they get the clock when they connect).
         ContinueSavedGameClock();
+        WatchForClose();
     }
 
     /// <summary>
@@ -251,9 +255,10 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// pauses for that part); only writing out the YAML happens in the background.
     /// </param>
     /// <param name="autosave">Write to <see cref="AutosavePath"/> instead of the main save, without a <c>.bak</c>.</param>
-    public bool SaveWorld(string reason, bool force = false, bool background = false, bool autosave = false)
+    /// <param name="panic">Write to <see cref="PanicSavePath"/> instead of the main save, without a <c>.bak</c>.</param>
+    public bool SaveWorld(string reason, bool force = false, bool background = false, bool autosave = false, bool panic = false)
     {
-        var target = autosave ? AutosavePath : _savePath;
+        var target = panic ? PanicSavePath : autosave ? AutosavePath : _savePath;
 
         if (!force && !CanSave())
         {
@@ -275,7 +280,7 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
         Log.Info($"Captured world state in {stopwatch.Elapsed.TotalSeconds:N2}s, writing to disk...");
 
-        var keepBackup = !autosave;
+        var keepBackup = !autosave && !panic;
         if (!background)
             return WriteSave(data, reason, stopwatch, target, keepBackup);
 
@@ -349,7 +354,28 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     public override void Shutdown()
     {
         base.Shutdown();
+        StopWatchingForClose();
         WaitForPendingWrite();
+    }
+
+    private bool _warmedUp;
+
+    /// <summary>
+    /// The first save after the server starts is several times slower than the rest (about 13s instead of 2s on a
+    /// big world), while the save code gets ready. Windows only gives a panic save about 5 seconds, so do one throwaway
+    /// save in memory right after the world first loads, before anyone has joined. This also makes the first autosave
+    /// freeze as short as the later ones. Only does anything the first time it's called.
+    /// </summary>
+    public void WarmUpSaving()
+    {
+        if (_warmedUp || !_enabled)
+            return;
+
+        _warmedUp = true;
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        if (TrySerializeWorld(out _))
+            Log.Info($"Got saving ready in {stopwatch.Elapsed.TotalSeconds:N2}s, so later saves (including a panic save) are quick.");
     }
 
     /// <summary>
@@ -418,6 +444,13 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
 
             _hiddenDoAfters.Clear();
 
+            foreach (var (disk, destination) in _hiddenDiskDestinations)
+            {
+                disk.Destination = destination;
+            }
+
+            _hiddenDiskDestinations.Clear();
+
             foreach (var proto in unsavable)
             {
                 proto.MapSavable = false;
@@ -468,6 +501,53 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
     /// and every one of them logs an error when the save is loaded. Drop those fields so they load as their default
     /// (usually "nothing") instead. E.g. a switched-on Newton's cradle remembers its looping click sound.
     /// </summary>
+    /// <summary>
+    /// Removes references to entities that aren't saved ("invalid") from lists and nested records, at any depth.
+    /// Top-level component fields are handled by the caller.
+    /// </summary>
+    private static int StripNestedDeadReferences(DataNode node)
+    {
+        var stripped = 0;
+        switch (node)
+        {
+            case SequenceDataNode list:
+                for (var i = list.Sequence.Count - 1; i >= 0; i--)
+                {
+                    if (list.Sequence[i] is ValueDataNode { Value: "invalid" })
+                    {
+                        list.RemoveAt(i);
+                        stripped++;
+                    }
+                    else
+                    {
+                        stripped += StripNestedDeadReferences(list.Sequence[i]);
+                    }
+                }
+
+                break;
+            case MappingDataNode mapping:
+                var dead = mapping
+                    .Where(kv => kv.Value is ValueDataNode { Value: "invalid" })
+                    .Select(kv => kv.Key)
+                    .ToList();
+
+                foreach (var key in dead)
+                {
+                    mapping.Remove(key);
+                    stripped++;
+                }
+
+                foreach (var (_, value) in mapping)
+                {
+                    stripped += StripNestedDeadReferences(value);
+                }
+
+                break;
+        }
+
+        return stripped;
+    }
+
     private void StripDeadReferences(MappingDataNode data)
     {
         if (!data.TryGet<SequenceDataNode>("entities", out var groups))
@@ -502,31 +582,27 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
                         stripped++;
                     }
 
-                    // Lists of entities (e.g. what something is linked to): drop the ones that aren't saved.
+                    // Lists of entities (e.g. what something is linked to): drop the ones that aren't saved. Also
+                    // look inside nested records (e.g. a changeling's consumed identities), which reference entities
+                    // that may not be saved either (a body left floating in space).
                     foreach (var (_, value) in comp)
                     {
-                        if (value is not SequenceDataNode list)
-                            continue;
-
-                        for (var i = list.Sequence.Count - 1; i >= 0; i--)
-                        {
-                            if (list.Sequence[i] is ValueDataNode { Value: "invalid" })
-                            {
-                                list.RemoveAt(i);
-                                stripped++;
-                            }
-                        }
+                        stripped += StripNestedDeadReferences(value);
                     }
 
                     switch (type?.Value)
                     {
                         // A physics joint (docking, welds, tethers...) to something that isn't saved can't be restored;
                         // leave the whole joint out.
+                        // Distance joints (dragging, tethers) can't be loaded at all: the engine reads their minimum
+                        // length before the maximum and throws, which fails the whole load. Drags are let go of after
+                        // loading instead (see ReleaseUnlinkedPulls).
                         case "Joint" when comp.TryGet<MappingDataNode>("joints", out var joints):
                         {
                             var deadJoints = joints
                                 .Where(kv => kv.Value is MappingDataNode joint &&
-                                             (!joint.TryGet<ValueDataNode>("bodyA", out var a) || a.Value == "invalid" ||
+                                             (joint.Tag == "!type:DistanceJoint" ||
+                                              !joint.TryGet<ValueDataNode>("bodyA", out var a) || a.Value == "invalid" ||
                                               !joint.TryGet<ValueDataNode>("bodyB", out var b) || b.Value == "invalid"))
                                 .Select(kv => kv.Key)
                                 .ToList();
@@ -709,10 +785,54 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         RefreshWeightlessness(result);
         ReapplyStationAnchors(result);
         RestartLoopingItemSounds(result);
+        ReleaseUnlinkedPulls(result);
 
         Log.Info($"Loaded world from {_savePath} in {stopwatch.Elapsed.TotalSeconds:N2}s (game time {_timing.CurTime}): " +
                  $"{result.Maps.Count} maps, {result.Grids.Count} grids, {result.Entities.Count} entities.");
         return true;
+    }
+
+    /// <summary>
+    /// The link that holds a dragged thing to whoever drags it isn't saved (see <see cref="StripDeadReferences"/>), so
+    /// after a load nobody is really dragging anything. Let go properly, which also frees the dragger's hand. Also clean
+    /// up after drags whose other end wasn't saved at all (magnet salvage, expedition zombies).
+    /// </summary>
+    private void ReleaseUnlinkedPulls(LoadResult result)
+    {
+        foreach (var uid in result.Entities)
+        {
+            // Hand placeholder for something that wasn't saved.
+            if (TryComp<VirtualItemComponent>(uid, out var placeholder) && !Exists(placeholder.BlockingEntity))
+                QueueDel(uid);
+
+            // Dragging something that wasn't saved (its link was left out of the save).
+            if (TryComp<PullerComponent>(uid, out var puller) && puller.Pulling == null)
+            {
+                RemComp<ActivePullerComponent>(uid);
+                _alerts.ClearAlert(uid, puller.PullingAlert);
+            }
+        }
+
+        var release = new List<(EntityUid, PullableComponent)>();
+        foreach (var uid in result.Entities)
+        {
+            if (!TryComp<PullableComponent>(uid, out var pullable) || pullable.Puller == null)
+                continue;
+
+            if (pullable.PullJointId != null &&
+                TryComp<Robust.Shared.Physics.JointComponent>(uid, out var joints) &&
+                joints.GetJoints.ContainsKey(pullable.PullJointId))
+            {
+                continue;
+            }
+
+            release.Add((uid, pullable));
+        }
+
+        foreach (var (uid, pullable) in release)
+        {
+            _pulling.TryStopPull(uid, pullable);
+        }
     }
 
     /// <summary>
@@ -847,10 +967,61 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
         return fallback?.Comp.MapId ?? MapId.Nullspace;
     }
 
+    /// <summary>
+    /// How many loose objects floating in space the last save left out (see <see cref="IsLooseInSpace"/>).
+    /// </summary>
+    public int LooseInSpaceSkipped { get; private set; }
+
+    /// <summary>
+    /// Whether this is a loose object (an item, a mob, a locker...) floating in open space, off every grid. Those are
+    /// left out of saves so junk drifting around the station (spent casings, salvage leftovers, dead carp) doesn't
+    /// pile up in the save forever. Anything carrying a player (alive, dead or disconnected, even inside a locker or
+    /// mech) is always kept, and so are fixed things without a physics body, like spawn or warp markers.
+    /// Paused maps are storage, not space (e.g. changelings keep the identities they've stolen as bodies floating on
+    /// one), so nothing on them counts as loose.
+    /// </summary>
+    private bool IsLooseInSpace(EntityUid uid)
+    {
+        var xform = Transform(uid);
+        if (!TryComp<MapComponent>(xform.ParentUid, out var map) || map.MapPaused ||
+            HasComp<MapGridComponent>(uid) || HasComp<MapComponent>(uid))
+        {
+            return false;
+        }
+
+        if (!TryComp<Robust.Shared.Physics.Components.PhysicsComponent>(uid, out var physics) ||
+            physics.BodyType == Robust.Shared.Physics.BodyType.Static)
+        {
+            return false;
+        }
+
+        return !CarriesPlayer(uid);
+    }
+
+    private bool CarriesPlayer(EntityUid uid)
+    {
+        if (TryComp<Content.Shared.Mind.Components.MindContainerComponent>(uid, out var mind) && mind.HasMind ||
+            HasComp<Robust.Shared.Player.ActorComponent>(uid))
+        {
+            return true;
+        }
+
+        var children = Transform(uid).ChildEnumerator;
+        while (children.MoveNext(out var child))
+        {
+            if (CarriesPlayer(child))
+                return true;
+        }
+
+        return false;
+    }
+
     private void OnBeforeSerialization(BeforeSerializationEvent ev)
     {
         if (!_saving || ev.Category != FileCategory.Save)
             return;
+
+        LooseInSpaceSkipped = 0;
 
         // Things that are re-created on load instead of being saved:
         // - Game rules are started fresh from the game preset every time the world is loaded.
@@ -894,22 +1065,51 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             {
                 toRemove.Enqueue(uid);
             }
+            else if (IsLooseInSpace(uid))
+            {
+                toRemove.Enqueue(uid);
+                LooseInSpaceSkipped++;
+                Log.Debug($"Not saving {ToPrettyString(uid)}: floating loose in space");
+                Log.Debug($"Not saving {ToPrettyString(uid)}: floating loose in space");
+            }
+        }
+
+        if (LooseInSpaceSkipped > 0)
+            Log.Info($"Leaving {LooseInSpaceSkipped} loose objects floating in space out of the save.");
+
+        while (toRemove.TryDequeue(out var uid))
+        {
+            // Drags involving something left out here carry on in the game (e.g. someone dragging a locker off magnet
+            // salvage); the drag itself isn't saved, see ReleaseUnlinkedPulls.
+            if (!ev.Entities.Remove(uid))
+                continue;
+
+            var children = Transform(uid).ChildEnumerator;
+            while (children.MoveNext(out var child))
+            {
+                toRemove.Enqueue(child);
+            }
+        }
+
+        // Leave out leftovers that only exist until the end of this tick, and anything whose parent isn't being saved
+        // (it would be saved floating with no parent). E.g. letting go of a pull above drops the puller's hand
+        // placeholder ("VIRTUAL ITEM YOU SHOULD NOT SEE THIS") onto the floor to be deleted. If the puller was on an
+        // expedition or magnet salvage, that floor isn't saved either. Placeholders still in a hand are kept: they
+        // block the second hand of a wielded two-handed weapon, and load back correctly.
+        foreach (var uid in ev.Entities)
+        {
+            if (EntityManager.IsQueuedForDeletion(uid) ||
+                HasComp<VirtualItemComponent>(uid) && (MetaData(uid).Flags & MetaDataFlags.InContainer) == 0 ||
+                Transform(uid).ParentUid is { Valid: true } parent && !ev.Entities.Contains(parent))
+            {
+                toRemove.Enqueue(uid);
+            }
         }
 
         while (toRemove.TryDequeue(out var uid))
         {
             if (!ev.Entities.Remove(uid))
                 continue;
-
-            // Something being dragged keeps a link (and a physics joint) to whoever drags it. If only one side is saved,
-            // the save can't be loaded, so let go first.
-            if (TryComp<PullableComponent>(uid, out var pullable) && pullable.Puller != null)
-                _pulling.TryStopPull(uid, pullable);
-            if (TryComp<PullerComponent>(uid, out var puller) && puller.Pulling is { } pulled &&
-                TryComp<PullableComponent>(pulled, out var pulledComp))
-            {
-                _pulling.TryStopPull(pulled, pulledComp);
-            }
 
             var children = Transform(uid).ChildEnumerator;
             while (children.MoveNext(out var child))
@@ -932,16 +1132,18 @@ public sealed partial class WorldPersistenceSystem : EntitySystem
             ev.Entities.Remove(uid);
         }
 
-        // Coordinates disks pointing at something that isn't being saved (e.g. a finished salvage expedition) would be
-        // saved as an invalid reference and log an error on load. They'd be blank after loading anyway, so blank them now.
+        // Coordinates disks pointing at something that isn't being saved (e.g. an expedition) would be saved as an
+        // invalid reference and log an error on load, so they're saved blank. The disk keeps its destination in the
+        // running game (it's put back right after): blanking it for real made an expedition disk useless at every
+        // autosave, so nobody could reach the expedition and its console stayed locked until the timer ran out.
         var disks = AllEntityQuery<ShuttleDestinationCoordinatesComponent>();
-        while (disks.MoveNext(out var disk, out var diskComp))
+        while (disks.MoveNext(out var diskComp))
         {
             if (diskComp.Destination is not { } destination || ev.Entities.Contains(destination))
                 continue;
 
+            _hiddenDiskDestinations.Add((diskComp, destination));
             diskComp.Destination = null;
-            Dirty(disk, diskComp);
         }
 
         // A shuttle mid-FTL points at its sounds, which aren't saved. Leave those references out of the save (they'd

@@ -9,6 +9,7 @@ using Content.Shared.CCVar;
 using Content.Shared.Chemistry.Components;
 using Content.Shared.Chemistry.Components.SolutionManager;
 using Content.Shared.Chemistry.EntitySystems;
+using Content.Shared.Inventory.VirtualItem;
 using Content.Shared.Mind;
 using Content.Shared.Mobs.Components;
 using Robust.Server.Player;
@@ -63,7 +64,8 @@ public sealed class WorldPersistenceTest : GameTest
         // Put the player into a named human body next to a named corgi.
         await server.WaitPost(() =>
         {
-            var coords = new MapCoordinates(0, 0, ticker.DefaultMap);
+            // On the station: loose objects floating in open space aren't saved.
+            var coords = OnStation(entMan);
             var body = entMan.SpawnEntity("MobHuman", coords);
             entMan.System<MetaDataSystem>().SetEntityName(body, PlayerBodyName);
             entMan.SpawnEntity("MobCorgi", coords);
@@ -150,6 +152,9 @@ public sealed class WorldPersistenceTest : GameTest
             .Where(p => !p.Components.ContainsKey("EventHorizon"))
             // Expedition zombies are deliberately not saved (see ExpeditionZombiesAreNotSavedButInfectionIs).
             .Where(p => !p.Components.ContainsKey("ZombifyOnSpawn"))
+            // The changeling meteor flies off its grid into open space, where loose objects aren't saved (with no
+            // player inside here; see LooseObjectsInSpaceAreNotSaved).
+            .Where(p => p.ID != "ChangelingMeteor")
             .Where(p => p.Categories.All(c => c.ID is not ("Spawner" or "Debug" or "GameRules")))
             .Select(p => p.ID)
             .ToList();
@@ -741,7 +746,8 @@ public sealed class WorldPersistenceTest : GameTest
         const string diskName = "Persistent Test Disk";
         await server.WaitPost(() =>
         {
-            var coords = new MapCoordinates(0, 0, ticker.DefaultMap);
+            // On the station: loose objects floating in open space aren't saved.
+            var coords = OnStation(entMan);
             var body = entMan.SpawnEntity("MobHuman", coords);
             entMan.System<MetaDataSystem>().SetEntityName(body, bodyName);
             var pda = entMan.SpawnEntity("CaptainPDA", coords);
@@ -908,6 +914,57 @@ public sealed class WorldPersistenceTest : GameTest
             entMan.System<MetaDataSystem>().SetEntityName(grid, name);
             return grid;
         }
+    }
+
+    /// <summary>
+    /// An autosave during an expedition leaves the expedition disk working. Saving used to blank every disk pointing
+    /// at an expedition in the running game, so the crew couldn't fly there and the console stayed locked until the
+    /// expedition's timer ran out.
+    /// </summary>
+    [Test]
+    public async Task AutosaveKeepsExpeditionDiskWorking()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var stationSys = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+        var res = server.ResolveDependency<IResourceManager>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+
+        EntityUid expedition = default, disk = default;
+        await server.WaitPost(() =>
+        {
+            var station = stationSys.GetStations().First().Owner;
+            expedition = mapSys.CreateMap(out _);
+            var expeditionComp = entMan.AddComponent<SalvageExpeditionComponent>(expedition);
+            expeditionComp.Station = station;
+            expeditionComp.EndTime = server.Timing.CurTime + TimeSpan.FromHours(1);
+
+            disk = entMan.SpawnEntity("CoordinatesDisk", new MapCoordinates(0, 0, ticker.DefaultMap));
+            entMan.GetComponent<Content.Shared.Shuttles.Components.ShuttleDestinationCoordinatesComponent>(disk).Destination = expedition;
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => Assert.That(persistence.SaveWorld("autosave", autosave: true), "The autosave failed"));
+        await pair.RunTicksSync(2);
+
+        await server.WaitPost(() =>
+        {
+            Assert.That(entMan.GetComponent<Content.Shared.Shuttles.Components.ShuttleDestinationCoordinatesComponent>(disk).Destination,
+                Is.EqualTo(expedition), "The autosave wiped the expedition disk");
+            Assert.That(entMan.EntityExists(expedition), "The autosave removed the expedition");
+
+            if (res.UserData.Exists(persistence.AutosavePath))
+                res.UserData.Delete(persistence.AutosavePath);
+        });
+
+        await Cleanup(pair);
     }
 
     /// <summary>
@@ -1563,6 +1620,68 @@ public sealed class WorldPersistenceTest : GameTest
             .Select(k => $"{k}: {before[k]} -> {after.GetValueOrDefault(k, "missing")}")
             .ToList();
         Assert.That(changed, Is.Empty, "Ground produce gives different chemicals after loading:\n" + string.Join("\n", changed));
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A hydroponics tray still knows which plant is growing in it after a load. It used to forget, so its window said
+    /// "The tray is empty" (and examining, analyzing, shoveling and chemicals in the soil all skipped the plant).
+    /// </summary>
+    [Test]
+    public async Task PlantedTrayKeepsItsPlantAfterLoad()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var trays = entMan.System<Content.Shared.Botany.Systems.PlantTraySystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string trayName = "Persistent Test Tray";
+        await server.WaitPost(() =>
+        {
+            var gridQuery = entMan.AllEntityQueryEnumerator<Robust.Shared.Map.Components.MapGridComponent, TransformComponent>();
+            while (gridQuery.MoveNext(out var grid, out var gridComp, out var xform))
+            {
+                if (xform.MapID != ticker.DefaultMap)
+                    continue;
+
+                mapSys.SetTile(grid, gridComp, new Vector2i(0, 61), new Tile(1));
+                var coords = new EntityCoordinates(grid, 0.5f, 61.5f);
+                var tray = entMan.SpawnEntity("HydroponicsTray", coords);
+                entMan.System<MetaDataSystem>().SetEntityName(tray, trayName);
+                trays.PlantingPlantInTray(tray, entMan.SpawnEntity("TomatoPlants", coords));
+                Assert.That(trays.TryGetPlant(tray, out _), "Test setup: tomato wasn't planted");
+                break;
+            }
+        });
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            EntityUid? tray = null;
+            var q = entMan.AllEntityQueryEnumerator<Content.Shared.Botany.Components.PlantTrayComponent, MetaDataComponent>();
+            while (q.MoveNext(out var uid, out _, out var meta))
+            {
+                if (meta.EntityName == trayName)
+                    tray = uid;
+            }
+
+            Assert.That(tray, Is.Not.Null, "The tray wasn't saved");
+            Assert.That(trays.TryGetPlant(tray!.Value, out var plant), "The tray forgot its plant after loading");
+            Assert.That(entMan.GetComponent<TransformComponent>(plant!.Value).ParentUid, Is.EqualTo(tray.Value),
+                "The tray points at a plant that isn't in it");
+        });
 
         await Cleanup(pair);
     }
@@ -3111,6 +3230,336 @@ public sealed class WorldPersistenceTest : GameTest
         });
 
         await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Saving used to make anyone dragging something that isn't saved (a locker off magnet salvage, an expedition
+    /// zombie) let go in the running game, which dropped their hand placeholder ("VIRTUAL ITEM YOU SHOULD NOT SEE
+    /// THIS") on the floor, where it got saved (with an error if they were standing on the salvage). Saves now leave
+    /// every drag alone. The drag link itself can't be saved (it made the whole save fail to load), so drags are let
+    /// go of after loading. At shutdown, a player on salvage is brought home with whatever they're dragging.
+    /// </summary>
+    [Test]
+    public async Task DragsSurviveSavesAndComeHomeFromSalvage()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var res = server.ResolveDependency<IResourceManager>();
+        var playerMan = server.ResolveDependency<IPlayerManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var mapSys = entMan.System<SharedMapSystem>();
+        var stationSys = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+        var pulling = entMan.System<Content.Shared.Movement.Pulling.Systems.PullingSystem>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string salvagerName = "Persistent Test Salvager";
+        const string lockerName = "Persistent Test Salvage Locker";
+        EntityUid salvagePuller = default, salvageLocker = default;
+        EntityUid stationPuller = default, zombie = default;
+        EntityUid crewPuller = default, crate = default;
+
+        var player = playerMan.Sessions.Single();
+        await server.WaitPost(() =>
+        {
+            var station = stationSys.GetStations().First().Owner;
+            var stationGrid = stationSys.GetLargestGrid(station)!.Value;
+            var stationGridComp = entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(stationGrid);
+            var plating = new Tile(server.ResolveDependency<Robust.Shared.Map.ITileDefinitionManager>()["Plating"].TileId);
+            for (var x = -3; x <= 3; x++)
+            {
+                for (var y = -3; y <= 5; y++)
+                {
+                    mapSys.SetTile(stationGrid, stationGridComp, new Vector2i(x, y), plating);
+                }
+            }
+
+            // Where players are brought home to (unless the map already has one).
+            entMan.SpawnEntity("SpawnPointCaptain", new EntityCoordinates(stationGrid, 3.5f, 0.5f));
+
+            // A player on salvage the magnet pulled in, dragging a locker that came with it.
+            var salvage = mapSys.CreateGridEntity(ticker.DefaultMap);
+            entMan.GetComponent<TransformComponent>(salvage).LocalPosition = new System.Numerics.Vector2(50, 50);
+            for (var x = 0; x <= 2; x++)
+            {
+                mapSys.SetTile(salvage, salvage.Comp, new Vector2i(x, 0), plating);
+            }
+
+            entMan.EnsureComponent<Content.Server.Salvage.Magnet.SalvageMagnetDataComponent>(station).ActiveEntities =
+                new List<EntityUid> { salvage };
+            salvagePuller = entMan.SpawnEntity("MobHuman", new EntityCoordinates(salvage, 0.5f, 0.5f));
+            entMan.System<MetaDataSystem>().SetEntityName(salvagePuller, salvagerName);
+            var minds = entMan.System<SharedMindSystem>();
+            minds.TransferTo(minds.CreateMind(player.UserId, salvagerName), salvagePuller);
+            salvageLocker = entMan.SpawnEntity("ClosetSteelBase", new EntityCoordinates(salvage, 1.5f, 0.5f));
+            entMan.System<MetaDataSystem>().SetEntityName(salvageLocker, lockerName);
+
+            // Someone on the station dragging an expedition zombie that followed the crew home.
+            stationPuller = entMan.SpawnEntity("MobHuman", new EntityCoordinates(stationGrid, 0.5f, 0.5f));
+            zombie = entMan.SpawnEntity("MobZombieExpedition", new EntityCoordinates(stationGrid, 1.5f, 0.5f));
+
+            // Someone on the station dragging an ordinary crate.
+            crewPuller = entMan.SpawnEntity("MobHuman", new EntityCoordinates(stationGrid, 0.5f, 5.5f));
+            crate = entMan.SpawnEntity("CrateGenericSteel", new EntityCoordinates(stationGrid, 1.5f, 5.5f));
+        });
+        await pair.RunTicksSync(5);
+
+        int CountPlaceholders()
+        {
+            var count = 0;
+            var q = entMan.AllEntityQueryEnumerator<VirtualItemComponent>();
+            while (q.MoveNext(out _, out _))
+            {
+                count++;
+            }
+
+            return count;
+        }
+
+        EntityUid? Pulling(EntityUid puller) =>
+            entMan.GetComponent<Content.Shared.Movement.Pulling.Components.PullerComponent>(puller).Pulling;
+
+        await server.WaitPost(() =>
+        {
+            Assert.That(pulling.TryStartPull(salvagePuller, salvageLocker), "Test setup: salvage pull");
+            Assert.That(pulling.TryStartPull(stationPuller, zombie), "Test setup: zombie pull");
+            Assert.That(pulling.TryStartPull(crewPuller, crate), "Test setup: crate pull");
+        });
+        await pair.RunTicksSync(2);
+        await server.WaitPost(() => Assert.That(CountPlaceholders(), Is.EqualTo(3), "Test setup"));
+
+        // An autosave doesn't make anyone let go.
+        await server.WaitPost(() => Assert.That(persistence.SaveWorld("autosave", autosave: true), "The autosave failed"));
+        await pair.RunTicksSync(2);
+        await server.WaitPost(() =>
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(Pulling(salvagePuller), Is.EqualTo(salvageLocker), "The autosave made the salvager let go of the locker");
+                Assert.That(Pulling(stationPuller), Is.EqualTo(zombie), "The autosave made someone let go of a zombie");
+                Assert.That(Pulling(crewPuller), Is.EqualTo(crate), "The autosave made someone let go of a crate");
+                Assert.That(CountPlaceholders(), Is.EqualTo(3), "The autosave dropped a hand placeholder");
+            });
+        });
+
+        // Shutdown save, then load.
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            EntityUid? FindByName(string name)
+            {
+                var q = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+                while (q.MoveNext(out var uid, out var meta))
+                {
+                    if (meta.EntityName == name && meta.EntityPrototype != null)
+                        return uid;
+                }
+
+                return null;
+            }
+
+            var salvager = FindByName(salvagerName);
+            var locker = FindByName(lockerName);
+            Assert.Multiple(() =>
+            {
+                Assert.That(salvager, Is.Not.Null, "The salvager is missing after loading");
+                Assert.That(locker, Is.Not.Null, "The locker the salvager was dragging was left on the salvage");
+                if (salvager != null && locker != null)
+                {
+                    var xformSys = entMan.System<SharedTransformSystem>();
+                    var salvagerGrid = entMan.GetComponent<TransformComponent>(salvager.Value).GridUid;
+                    Assert.That(salvagerGrid, Is.Not.Null, "The salvager was shoved off the station");
+                    Assert.That(entMan.GetComponent<TransformComponent>(locker.Value).GridUid, Is.EqualTo(salvagerGrid),
+                        "The locker didn't come home with the salvager");
+                    var apart = (xformSys.GetWorldPosition(locker.Value) - xformSys.GetWorldPosition(salvager.Value)).Length();
+                    Assert.That(apart, Is.InRange(0.5f, 1.6f), "The locker should be on the floor tile next to the salvager");
+                }
+
+                // Drags are let go of after loading, which also removes the placeholder in the dragger's hand.
+                Assert.That(CountPlaceholders(), Is.Zero, "A hand placeholder survived the load");
+                var q = entMan.AllEntityQueryEnumerator<Content.Shared.Movement.Pulling.Components.PullerComponent>();
+                while (q.MoveNext(out var uid, out var puller))
+                {
+                    Assert.That(puller.Pulling, Is.Null, $"{entMan.ToPrettyString(uid)} is still dragging after the load");
+                    Assert.That(entMan.HasComponent<Content.Shared.Movement.Pulling.Components.ActivePullerComponent>(uid), Is.False,
+                        $"{entMan.ToPrettyString(uid)} still counts as dragging after the load");
+                }
+            });
+
+            if (res.UserData.Exists(persistence.AutosavePath))
+                res.UserData.Delete(persistence.AutosavePath);
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// Loose objects floating in open space (off every grid) are left out of saves, so junk drifting around doesn't
+    /// pile up forever. Players floating in space, and lockers with a player inside, are kept; so is everything on a
+    /// grid. Saving doesn't delete anything in the running game.
+    /// </summary>
+    [Test]
+    public async Task LooseObjectsInSpaceAreNotSaved()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var playerMan = server.ResolveDependency<IPlayerManager>();
+        var res = server.ResolveDependency<IResourceManager>();
+        var ticker = entMan.System<ServerGameTicker>();
+        var stationSys = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+        var meta = entMan.System<MetaDataSystem>();
+        var minds = entMan.System<SharedMindSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        server.CfgMan.SetCVar(CCVars.PersistenceSaveOnRoundRestart, true);
+
+        const string prefix = "Persistent Test Space ";
+        var kept = new[] { prefix + "Floating Player", prefix + "Locker With Player", prefix + "Person In Locker", prefix + "Crowbar On Station" };
+        var dropped = new[] { prefix + "Crowbar", prefix + "Carp", prefix + "Empty Locker", prefix + "Medkit In Empty Locker" };
+        var player = playerMan.Sessions.Single();
+
+        await server.WaitPost(() =>
+        {
+            EntityUid Spawn(string proto, string name, float x)
+            {
+                var uid = entMan.SpawnEntity(proto, new MapCoordinates(500 + x, 500, ticker.DefaultMap));
+                meta.SetEntityName(uid, prefix + name);
+                return uid;
+            }
+
+            var floating = Spawn("MobHuman", "Floating Player", 0);
+            minds.TransferTo(minds.CreateMind(player.UserId, "Floating Player"), floating);
+
+            var lockerWithPlayer = Spawn("ClosetSteelBase", "Locker With Player", 3);
+            var inside = Spawn("MobHuman", "Person In Locker", 3);
+            minds.TransferTo(minds.CreateMind(null, "Person In Locker"), inside);
+            Assert.That(entMan.System<Content.Shared.Storage.EntitySystems.SharedEntityStorageSystem>().Insert(inside, lockerWithPlayer),
+                "Test setup: couldn't put the person in the locker");
+
+            Spawn("Crowbar", "Crowbar", 6);
+            Spawn("MobCarp", "Carp", 9);
+            var emptyLocker = Spawn("ClosetSteelBase", "Empty Locker", 12);
+            var medkit = Spawn("MedkitFilled", "Medkit In Empty Locker", 12);
+            Assert.That(entMan.System<Content.Shared.Storage.EntitySystems.SharedEntityStorageSystem>().Insert(medkit, emptyLocker),
+                "Test setup: couldn't put the medkit in the locker");
+
+            var onStation = entMan.SpawnEntity("Crowbar", OnStation(entMan));
+            meta.SetEntityName(onStation, prefix + "Crowbar On Station");
+        });
+        await pair.RunTicksSync(5);
+
+        List<string> Present()
+        {
+            var names = new List<string>();
+            var q = entMan.AllEntityQueryEnumerator<MetaDataComponent>();
+            while (q.MoveNext(out var m))
+            {
+                // Mobs get a number added to their name (e.g. "Carp (429)").
+                if (m.EntityName.StartsWith(prefix) && m.EntityPrototype != null)
+                    names.Add(System.Text.RegularExpressions.Regex.Replace(m.EntityName, @" \(\d+\)$", ""));
+            }
+
+            return names;
+        }
+
+        // An autosave leaves the running game alone.
+        await server.WaitPost(() =>
+        {
+            Assert.That(kept.Concat(dropped).Except(Present()), Is.Empty, "Test setup: something disappeared before saving");
+            Assert.That(persistence.SaveWorld("autosave", autosave: true), "The autosave failed");
+            Assert.That(persistence.LooseInSpaceSkipped, Is.EqualTo(3), "Expected the crowbar, carp and empty locker to be skipped");
+        });
+        await pair.RunTicksSync(2);
+        await server.WaitPost(() => Assert.That(kept.Concat(dropped).Except(Present()), Is.Empty, "The autosave deleted something in the running game"));
+
+        await server.WaitPost(() => ticker.RestartRound());
+        await pair.RunTicksSync(10);
+        Assert.That(ticker.WorldRestoredFromSave);
+
+        await server.WaitPost(() =>
+        {
+            var present = Present();
+            Assert.Multiple(() =>
+            {
+                foreach (var name in kept)
+                {
+                    Assert.That(present, Does.Contain(name), $"{name} should have been saved");
+                }
+
+                foreach (var name in dropped)
+                {
+                    Assert.That(present, Does.Not.Contain(name), $"{name} was floating in space and shouldn't have been saved");
+                }
+            });
+
+            if (res.UserData.Exists(persistence.AutosavePath))
+                res.UserData.Delete(persistence.AutosavePath);
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A panic save (server window closed / Windows shutting down) goes to its own file and leaves the main save alone,
+    /// including at the shutdown that follows.
+    /// </summary>
+    [Test]
+    public async Task PanicSaveGoesToItsOwnFile()
+    {
+        var pair = Pair;
+        var server = pair.Server;
+        var entMan = server.ResolveDependency<IEntityManager>();
+        var res = server.ResolveDependency<IResourceManager>();
+        var persistence = entMan.System<WorldPersistenceSystem>();
+
+        server.CfgMan.SetCVar(CCVars.UsePersistence, true);
+        server.CfgMan.SetCVar(CCVars.PersistenceWorldFile, SavePath);
+        server.CfgMan.SetCVar(CCVars.PersistenceAutosaveInterval, 0f);
+        await pair.RunTicksSync(5);
+
+        await server.WaitPost(() =>
+        {
+            if (res.UserData.Exists(persistence.PanicSavePath))
+                res.UserData.Delete(persistence.PanicSavePath);
+            if (res.UserData.Exists(persistence.SavePath))
+                res.UserData.Delete(persistence.SavePath);
+
+            Assert.That(persistence.PanicSave("test"), "The panic save failed");
+            Assert.That(persistence.PanicSaved);
+            Assert.That(res.UserData.Exists(persistence.PanicSavePath), "No panic save file was written");
+            Assert.That(res.UserData.Exists(persistence.SavePath), Is.False, "The panic save touched the main save");
+            Assert.That(res.UserData.Exists(new ResPath(persistence.PanicSavePath + ".tmp")), Is.False, "The panic save left its temporary file behind");
+
+            res.UserData.Delete(persistence.PanicSavePath);
+        });
+
+        await Cleanup(pair);
+    }
+
+    /// <summary>
+    /// A spot on the station grid (the test map's origin is open space, where loose objects aren't saved).
+    /// </summary>
+    private static EntityCoordinates OnStation(IEntityManager entMan)
+    {
+        var stations = entMan.System<Content.Shared.Station.Systems.StationSystem>();
+        var grid = stations.GetLargestGrid(stations.GetStations().First().Owner)!.Value;
+        var mapSys = entMan.System<SharedMapSystem>();
+        var gridComp = entMan.GetComponent<Robust.Shared.Map.Components.MapGridComponent>(grid);
+        // A tile with floor on it: something spawned over an empty tile falls off the grid into space.
+        var tile = mapSys.GetAllTiles(grid, gridComp).First();
+        return mapSys.GridTileToLocal(grid, gridComp, tile.GridIndices);
     }
 
     private static async Task Cleanup(Pair.TestPair pair)

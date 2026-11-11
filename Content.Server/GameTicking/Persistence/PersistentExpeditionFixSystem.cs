@@ -12,6 +12,7 @@ using Content.Shared.Station.Systems;
 using Content.Shared.Timing;
 using Robust.Shared.Containers;
 using Robust.Shared.Map;
+using Content.Shared.Physics;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Timing;
 
@@ -38,6 +39,7 @@ public sealed partial class PersistentExpeditionFixSystem : EntitySystem
     [Dependency] private SharedTransformSystem _transform = default!;
     [Dependency] private SharedMapSystem _map = default!;
     [Dependency] private SharedContainerSystem _container = default!;
+    [Dependency] private Content.Shared.Maps.TurfSystem _turf = default!;
     [Dependency] private Content.Server.Salvage.SalvageSystem _salvage = default!;
 
     /// <summary>
@@ -90,9 +92,7 @@ public sealed partial class PersistentExpeditionFixSystem : EntitySystem
 
             foreach (var mob in mobs)
             {
-                _container.TryRemoveFromContainer(mob, force: true);
-                _transform.SetCoordinates(mob, GetArrivalCoordinates(home.Value));
-                _transform.AttachToGridOrMap(mob);
+                BringHome(mob, home.Value, xform => xform.MapUid == expeditionMap);
                 Log.Info($"Brought {ToPrettyString(mob)} home from expedition {ToPrettyString(expeditionMap)}");
             }
         }
@@ -131,12 +131,73 @@ public sealed partial class PersistentExpeditionFixSystem : EntitySystem
 
             foreach (var mob in mobs)
             {
-                _container.TryRemoveFromContainer(mob, force: true);
-                _transform.SetCoordinates(mob, GetArrivalCoordinates(home.Value));
-                _transform.AttachToGridOrMap(mob);
+                BringHome(mob, home.Value, xform => xform.GridUid is { } grid && grids.Contains(grid));
                 Log.Info($"Brought {ToPrettyString(mob)} home from magnet salvage");
             }
         }
+    }
+
+    /// <summary>
+    /// Moves a player home, along with whatever they're dragging if it's somewhere that isn't saved too (e.g. a locker
+    /// they were dragging off the salvage). The dragged thing goes on a free floor tile next to them, since two bodies
+    /// on the same spot shove each other (it pushed the player off the station in testing). If there's no free floor
+    /// next to them, it's left behind.
+    /// </summary>
+    private void BringHome(EntityUid mob, EntityUid home, Func<TransformComponent, bool> notSaved)
+    {
+        EntityUid? dragged = null;
+        if (TryComp<Content.Shared.Movement.Pulling.Components.PullerComponent>(mob, out var puller) &&
+            puller.Pulling is { } pulling && notSaved(Transform(pulling)))
+        {
+            dragged = pulling;
+        }
+
+        var arrival = GetArrivalCoordinates(home);
+        _container.TryRemoveFromContainer(mob, force: true);
+        _transform.SetCoordinates(mob, arrival);
+        _transform.AttachToGridOrMap(mob);
+
+        if (dragged is not { } item)
+            return;
+
+        if (!TryFindFreeFloorNextTo(arrival, out var spot))
+        {
+            Log.Info($"Left {ToPrettyString(item)} behind: no free floor next to where {ToPrettyString(mob)} arrived");
+            return;
+        }
+
+        _transform.SetCoordinates(item, spot);
+        _transform.AttachToGridOrMap(item);
+        Log.Info($"Brought {ToPrettyString(item)} home too, since {ToPrettyString(mob)} was dragging it");
+    }
+
+    private static readonly Vector2i[] NextTo =
+    {
+        new(1, 0), new(-1, 0), new(0, 1), new(0, -1),
+        new(1, 1), new(-1, 1), new(1, -1), new(-1, -1),
+    };
+
+    /// <summary>
+    /// The middle of a floor tile next to <paramref name="coords"/> with nothing solid on it.
+    /// </summary>
+    private bool TryFindFreeFloorNextTo(EntityCoordinates coords, out EntityCoordinates spot)
+    {
+        spot = default;
+        if (_transform.GetGrid(coords) is not { } grid || !TryComp<MapGridComponent>(grid, out var gridComp))
+            return false;
+
+        var center = _map.TileIndicesFor(grid, gridComp, coords);
+        foreach (var offset in NextTo)
+        {
+            var tile = _map.GetTileRef(grid, gridComp, center + offset);
+            if (_turf.IsSpace(tile) || _turf.IsTileBlocked(tile, CollisionGroup.MobMask))
+                continue;
+
+            spot = _map.GridTileToLocal(grid, gridComp, tile.GridIndices);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

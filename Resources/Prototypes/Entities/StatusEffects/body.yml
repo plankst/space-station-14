@@ -57,6 +57,13 @@
   parent: [ PainNumbnessStatusEffectBase, MobStatusEffectDebuff ]
   id: StatusEffectPainNumbness
   name: pain numbness
+  components:
+  - type: DamageModifierStatusEffect # Numbed to pain, so brute hits land a little softer.
+    modifiers:
+      coefficients:
+        Blunt: 0.95
+        Slash: 0.95
+        Piercing: 0.95
 
 # Ignore movement slowdown from damage thresholds.
 - type: entity

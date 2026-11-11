@@ -38,6 +38,17 @@
   category: construction-category-structures
 # endregion Surveillance
 
+# region Janitorial
+- type: construction
+  parent: BaseUtility
+  id: FloorDrain
+  graph: FloorDrain
+  startNode: start
+  targetNode: drain
+  conditions:
+  - !type:TileNotBlocked
+# endregion Janitorial
+
 # region Power
 - type: construction
   parent: BaseUtilityWallmount

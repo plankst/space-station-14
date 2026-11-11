@@ -35,6 +35,9 @@
     maxFillLevels: 1
     fillBaseName: fill-
     solutionName: drainBuffer
+  - type: Construction
+    graph: FloorDrain
+    node: drain
   - type: Damageable
     damageModifierSet: SteelMod
   - type: Destructible

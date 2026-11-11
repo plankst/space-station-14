@@ -84,8 +84,9 @@ public sealed partial class PlantTrayComponent : Component
 
     /// <summary>
     /// Currently planted plant entity (parented to this tray).
+    /// Saved so the tray still knows its plant after a world save is loaded.
     /// </summary>
-    [ViewVariables, AutoNetworkedField]
+    [DataField, AutoNetworkedField]
     public EntityUid? PlantEntity;
 
     /// <summary>

@@ -188,6 +188,14 @@
           inverted: true
       - !type:Drunk
         boozePower: 2
+      # Once properly drunk (about two beers), you stop feeling pain as much.
+      - !type:ModifyStatusEffect
+        conditions:
+        - !type:ReagentCondition
+          reagent: Ethanol
+          min: 6
+        effectProto: StatusEffectPainNumbness
+        time: 5
 
 - type: reagent
   id: Gin

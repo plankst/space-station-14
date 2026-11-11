@@ -7,7 +7,7 @@
             Margin="4 0 0 0"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
-            MinSize="32 32"
+            SetSize="32 32"
             />
     <Label Name="NameLabel"
             SizeFlagsStretchRatio="3"

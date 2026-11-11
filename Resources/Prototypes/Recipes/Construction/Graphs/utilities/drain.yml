@@ -1,0 +1,24 @@
+- type: constructionGraph
+  id: FloorDrain
+  start: start
+  graph:
+    - node: start
+      edges:
+        - to: drain
+          steps:
+            - material: Steel
+              amount: 1
+              doAfter: 2
+
+    - node: drain
+      entity: FloorDrain
+      edges:
+        - to: start
+          completed:
+            - !type:SpawnPrototype
+              prototype: SheetSteel1
+              amount: 1
+            - !type:DeleteEntity {}
+          steps:
+            - tool: Screwing
+              doAfter: 2

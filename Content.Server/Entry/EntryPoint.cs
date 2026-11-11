@@ -201,7 +201,8 @@ namespace Content.Server.Entry
             try
             {
                 var persistence = _entSys.GetEntitySystem<WorldPersistenceSystem>();
-                if (persistence.CanSave())
+                // After a panic save (window closed), Windows can kill the server at any moment: leave the main save alone.
+                if (persistence.CanSave() && !persistence.PanicSaved)
                 {
                     // Bring players home from expeditions and put held items on the floor first.
                     persistence.PrepareForFinalSave();

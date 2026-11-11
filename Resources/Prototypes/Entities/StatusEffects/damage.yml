@@ -31,6 +31,16 @@
       coefficients:
         Radiation: 0.1
 
+- type: entity
+  parent: StatusEffectDamageModifierBase
+  id: StatusEffectSafeApoptosis
+  name: safe apoptosis
+  components:
+  - type: DamageModifierStatusEffect
+    modifiers:
+      coefficients:
+        Radiation: 0.975
+
 ## Debuff
 
 - type: entity
